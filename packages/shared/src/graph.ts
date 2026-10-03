@@ -8,6 +8,7 @@ export function nodeMap(wf: Pick<Workflow, 'nodes'>): Map<string, WorkflowNode> 
 export function portsCompatible(source: PortType, target: PortType): boolean {
   if (source === target) return true;
   if (target === 'any') return true;
+  if (target === 'rules') return source === 'text';
   if (target === 'json' && source !== 'text') return true;
   return false;
 }

@@ -10,7 +10,7 @@ const TABS = [
   ['tasks', 'Claude tasks'],
 ] as const;
 
-export function Timeline() {
+export function Timeline({ onClose }: { onClose?: () => void }) {
   const tab = useStore((s) => s.bottomTab);
   const set = useStore((s) => s.set);
   const [collapsed, setCollapsed] = useState(false);
@@ -24,6 +24,7 @@ export function Timeline() {
         ))}
         <span className="grow" />
         <button className="btn ghost xs" onClick={() => setCollapsed(!collapsed)} aria-expanded={!collapsed} aria-label="Toggle timeline">{collapsed ? '▴' : '▾'}</button>
+        {onClose && <button className="btn ghost xs" onClick={onClose} aria-label="Close logs" title="Close (L)">✕</button>}
       </div>
       {!collapsed && (
         <div className="timeline-body" role="tabpanel">

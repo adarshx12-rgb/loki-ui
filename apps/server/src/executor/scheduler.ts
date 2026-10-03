@@ -1,4 +1,4 @@
-import { applyPostProcess, topoOrder, type NodeRunState, type Workflow, type WorkflowNode } from '@nodepilot/shared';
+import { applyPostProcess, topoOrder, VISUAL_ONLY_KINDS, type NodeRunState, type Workflow, type WorkflowNode } from '@nodepilot/shared';
 
 export interface HandlerContext {
   node: WorkflowNode;
@@ -78,7 +78,9 @@ const naturalCmp = (a: string, b: string) => a.localeCompare(b, undefined, { num
  *  - per-node timeouts abort the handler; retries only happen for nodes marked safeToRetry;
  *  - cancelling the run aborts running handlers and marks everything unfinished `cancelled`.
  */
-export async function runSchedule(wf: Workflow, opts: ScheduleOptions): Promise<ScheduleResult> {
+export async function runSchedule(full: Workflow, opts: ScheduleOptions): Promise<ScheduleResult> {
+  // Layout-only nodes (groups) are never scheduled.
+  const wf: Workflow = { ...full, nodes: full.nodes.filter((n) => !VISUAL_ONLY_KINDS.has(n.kind)) };
   const sleep = opts.sleep ?? abortableSleep;
   const now = opts.now ?? Date.now;
   const order = topoOrder(wf); // throws on cycles; validation should have caught it

@@ -34,7 +34,8 @@ export function Inspector() {
   const wf = useStore((s) => s.wf);
   const nodeId = useStore((s) => s.selectedNodeId);
   const edgeId = useStore((s) => s.selectedEdgeId);
-  const [tab, setTab] = useState<(typeof TABS)[number][0]>('overview');
+  const tab = useStore((s) => s.inspectorTab) as (typeof TABS)[number][0];
+  const setTab = (t: (typeof TABS)[number][0]) => useStore.getState().set({ inspectorTab: t });
   const node = wf?.nodes.find((n) => n.id === nodeId) ?? null;
   useDraft(node, wf?.revision ?? 0);
 

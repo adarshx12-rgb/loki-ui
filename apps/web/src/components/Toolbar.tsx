@@ -28,7 +28,8 @@ export function Toolbar() {
           </option>
         ))}
       </select>
-      <button className="btn ghost" onClick={() => s.set({ dialog: 'newWorkflow' })} title="New workflow">＋ New</button>
+      <button className="btn ghost" onClick={() => s.set({ dialog: 'newWorkflow' })} title="New empty workflow">＋ New</button>
+      <button className="btn" onClick={() => s.set({ dialog: 'import' })} title="Build a workflow from a git link or project folder">⇪ Import project</button>
       {wf && <span className="rev" title={`Revision ${wf.revision}. Executable hash ${s.execHash} (unchanged by layout edits)`}>r{wf.revision}</span>}
       <div className="sep" />
       <button className="btn" disabled={!dirty} onClick={() => draftState.save()} title="Save inspector changes (Ctrl+S)">
@@ -46,6 +47,10 @@ export function Toolbar() {
       <button className="btn danger" disabled={!running} onClick={() => void s.cancelRun()} title="Cancel the current run">■ Cancel</button>
       {run && <StatusChip status={run.status} />}
       <div className="grow" />
+      <div className="seg panel-toggles" role="group" aria-label="Panels">
+        <button className={`seg-btn${s.panels.inspector ? ' on' : ''}`} aria-pressed={s.panels.inspector} onClick={() => s.togglePanel('inspector')} title="Inspector (I, or double-click a node)">☰ Inspector</button>
+        <button className={`seg-btn${s.panels.logs ? ' on' : ''}`} aria-pressed={s.panels.logs} onClick={() => s.togglePanel('logs')} title="Event log (L)">≡ Logs</button>
+      </div>
       <button className="btn ghost" disabled={!wf} onClick={() => s.set({ dialog: 'ask', askTarget: {} })} title="Ask Claude Code about this workflow">✦ Ask Claude</button>
       <button className="btn ghost" onClick={() => s.set({ dialog: 'connections' })} title="Projects, Claude runner, GitHub, backends, MCP">⚯ Connections</button>
       <button className="btn ghost" onClick={() => s.set({ dialog: 'help' })} title="Keyboard shortcuts (?)" aria-label="Help">?</button>

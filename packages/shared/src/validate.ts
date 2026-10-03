@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { findCycle, portsCompatible, stableStringify } from './graph.js';
 import { redactValue } from './redact.js';
-import { workflowSchema, type Workflow } from './schema.js';
+import { VISUAL_ONLY_KINDS, workflowSchema, type Workflow } from './schema.js';
 
 /**
  * Issue severities:
@@ -141,6 +141,7 @@ export function validateWorkflow(input: unknown, ctx: ValidationContext = {}): V
 
   // ---- run-blocking ----
   for (const n of wf.nodes) {
+    if (VISUAL_ONLY_KINDS.has(n.kind)) continue;
     for (const p of n.inputs) {
       if (p.required && !incomingByPort.has(`${n.id}:${p.id}`)) {
         push({ level: 'run', code: 'missing_required_input', message: `"${n.label}" is missing required input "${p.label}"`, nodeId: n.id });
@@ -192,7 +193,7 @@ export function validateWorkflow(input: unknown, ctx: ValidationContext = {}): V
       });
     }
   }
-  if (wf.nodes.length === 0) push({ level: 'run', code: 'empty', message: 'Workflow has no nodes' });
+  if (!wf.nodes.some((n) => !VISUAL_ONLY_KINDS.has(n.kind))) push({ level: 'run', code: 'empty', message: 'Workflow has no nodes' });
 
   const ok = !issues.some((i) => i.level === 'save');
   const runnable = ok && !issues.some((i) => i.level === 'run');

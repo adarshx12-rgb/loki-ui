@@ -66,6 +66,7 @@ const demoHandlers: Record<string, (ctx: HandlerContext) => Record<string, unkno
   },
   results: ({ inputs }) => ({ ...Object.fromEntries(Object.entries(inputs)), _label: DEMO_LABEL }),
   echo: ({ node, inputs }) => Object.fromEntries(node.outputs.map((p) => [p.id, inputs])),
+  instruction: ({ node }) => Object.fromEntries(node.outputs.map((p) => [p.id, String(node.config.params.text ?? node.instructions ?? '')])),
 };
 
 function demoHandler(name: string): Handler {

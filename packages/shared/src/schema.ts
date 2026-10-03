@@ -12,7 +12,7 @@ export const idSchema = z
   .string()
   .regex(/^[A-Za-z0-9_-]{1,64}$/, 'IDs may contain letters, digits, "_" and "-" (max 64 chars)');
 
-export const PORT_TYPES = ['any', 'text', 'json', 'plan', 'plans', 'scan', 'scene', 'score', 'scores', 'report'] as const;
+export const PORT_TYPES = ['any', 'text', 'json', 'plan', 'plans', 'scan', 'scene', 'score', 'scores', 'report', 'rules'] as const;
 export const portTypeSchema = z.enum(PORT_TYPES);
 export type PortType = z.infer<typeof portTypeSchema>;
 
@@ -46,6 +46,16 @@ export const NODE_KINDS = [
   'api_service',
   'model',
   'output',
+  /** Prompt templates, rules and policies; rendered as a parallelogram attached to the top of the node it governs. */
+  'instruction',
+  /** Optional side branch (screeners, pre-judges, alternate variants); rendered dashed. */
+  'auxiliary',
+  /** Visual container for an ensemble (e.g. a judge council). Never executed. */
+  'group',
+  /** Conditional branch / dispatcher; rendered as a diamond. */
+  'router',
+  /** Database, cache, vector index or queue; rendered as a cylinder. */
+  'datastore',
 ] as const;
 export const nodeKindSchema = z.enum(NODE_KINDS);
 export type NodeKind = z.infer<typeof nodeKindSchema>;
@@ -60,7 +70,11 @@ export const DEMO_HANDLERS = [
   'score_combiner',
   'results',
   'echo',
+  'instruction',
 ] as const;
+
+/** Kinds that are layout only and never scheduled or validated for execution. */
+export const VISUAL_ONLY_KINDS: ReadonlySet<string> = new Set(['group']);
 
 /** `env:NAME` reads an environment variable of the server; `secret:name` reads the local secret store. Never a raw secret. */
 export const credentialRefSchema = z
@@ -163,6 +177,9 @@ export const nodeSchema = z.object({
     .object({
       color: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(),
       collapsed: z.boolean().optional(),
+      /** Size of resizable nodes (groups). */
+      width: z.number().int().min(80).max(6000).optional(),
+      height: z.number().int().min(60).max(6000).optional(),
     })
     .default({}),
   // ---- contracts ----

@@ -12,6 +12,9 @@ function node(input: WorkflowNodeInput): WorkflowNode {
   return nodeSchema.parse(input);
 }
 
+/** Optional top-edge port that instruction (parallelogram) nodes connect into. */
+export const RULES_PORT = { id: 'rules', label: 'Rules', type: 'rules' as const, required: false, multiple: true, merge: 'array' as const };
+
 const demo = (handler: string) => ({ implementation: { kind: 'demo' as const, handler: handler as never } });
 
 /** Palette entries. Demo templates run deterministic local handlers; others start "Not configured". */
@@ -22,7 +25,7 @@ export const NODE_TEMPLATES: NodeTemplate[] = [
   },
   {
     key: 'planner', kind: 'planner', label: 'Planner', description: 'Turns a query into a plan (demo).',
-    build: (id, position) => node({ id, kind: 'planner', label: 'Planner', position, inputs: [{ id: 'query', label: 'Query', type: 'text' }], outputs: [{ id: 'plan', label: 'Plan', type: 'plan' }], config: { ...demo('planner'), params: { strategy: 'breadth' } } }),
+    build: (id, position) => node({ id, kind: 'planner', label: 'Planner', position, inputs: [RULES_PORT, { id: 'query', label: 'Query', type: 'text' }], outputs: [{ id: 'plan', label: 'Plan', type: 'plan' }], config: { ...demo('planner'), params: { strategy: 'breadth' } } }),
   },
   {
     key: 'plan_combiner', kind: 'combiner', label: 'Plan combiner', description: 'Merges several plans (explicit array merge).',
@@ -34,11 +37,11 @@ export const NODE_TEMPLATES: NodeTemplate[] = [
   },
   {
     key: 'scene_worker', kind: 'worker', label: 'Scene worker', description: 'Builds a scene from scan results (demo).',
-    build: (id, position) => node({ id, kind: 'worker', label: 'Scene worker', position, inputs: [{ id: 'scan', label: 'Scan', type: 'scan' }], outputs: [{ id: 'scene', label: 'Scene', type: 'scene' }], config: demo('scene_worker') }),
+    build: (id, position) => node({ id, kind: 'worker', label: 'Scene worker', position, inputs: [RULES_PORT, { id: 'scan', label: 'Scan', type: 'scan' }], outputs: [{ id: 'scene', label: 'Scene', type: 'scene' }], config: demo('scene_worker') }),
   },
   {
     key: 'judge', kind: 'judge', label: 'Judge', description: 'Scores a scene against one criterion (demo).',
-    build: (id, position) => node({ id, kind: 'judge', label: 'Judge', position, inputs: [{ id: 'scene', label: 'Scene', type: 'scene' }], outputs: [{ id: 'score', label: 'Score', type: 'score' }], config: { ...demo('judge'), params: { criterion: 'coherence' }, retry: { maxAttempts: 2, backoffMs: 200, safeToRetry: true } } }),
+    build: (id, position) => node({ id, kind: 'judge', label: 'Judge', position, inputs: [RULES_PORT, { id: 'scene', label: 'Scene', type: 'scene' }], outputs: [{ id: 'score', label: 'Score', type: 'score' }], config: { ...demo('judge'), params: { criterion: 'coherence' }, retry: { maxAttempts: 2, backoffMs: 200, safeToRetry: true } } }),
   },
   {
     key: 'score_combiner', kind: 'aggregator', label: 'Score combiner', description: 'Aggregates judge scores (explicit keyed merge).',
@@ -50,15 +53,35 @@ export const NODE_TEMPLATES: NodeTemplate[] = [
   },
   {
     key: 'model', kind: 'model', label: 'Model call', description: 'Real model call via an adapter. Needs a credential reference.',
-    build: (id, position) => node({ id, kind: 'model', label: 'Model call', position, inputs: [{ id: 'prompt', label: 'Prompt', type: 'any' }], outputs: [{ id: 'text', label: 'Text', type: 'text' }], config: { implementation: { kind: 'model', provider: 'anthropic', model: 'claude-haiku-4-5', maxTokens: 512 }, timeoutMs: 60_000 } }),
+    build: (id, position) => node({ id, kind: 'model', label: 'Model call', position, inputs: [RULES_PORT, { id: 'prompt', label: 'Prompt', type: 'any' }], outputs: [{ id: 'text', label: 'Text', type: 'text' }], config: { implementation: { kind: 'model', provider: 'anthropic', model: 'claude-haiku-4-5', maxTokens: 512 }, timeoutMs: 60_000 } }),
   },
   {
     key: 'api_service', kind: 'api_service', label: 'Observed API service', description: 'A node implemented by an external backend; observed, never executed here.',
     build: (id, position) => node({ id, kind: 'api_service', label: 'API service', position, inputs: [{ id: 'in', label: 'In', type: 'any', required: false }], outputs: [{ id: 'out', label: 'Out', type: 'json' }], config: { implementation: { kind: 'observed', serviceId: 'example-backend' } } }),
   },
   {
+    key: 'instruction', kind: 'instruction', label: 'Instructions / rules', description: 'Prompt template, policy or rules. Attach to the top of the node it governs.',
+    build: (id, position) => node({ id, kind: 'instruction', label: 'Rules', position, outputs: [{ id: 'rules', label: 'Rules', type: 'rules' }], instructions: 'Describe the rules or prompt this node applies.', config: demo('instruction') }),
+  },
+  {
+    key: 'auxiliary', kind: 'auxiliary', label: 'Side check', description: 'Optional side branch: screener, pre-judge or alternate variant (dashed).',
+    build: (id, position) => node({ id, kind: 'auxiliary', label: 'Side check', position, inputs: [{ id: 'in', label: 'In', type: 'any' }], outputs: [{ id: 'out', label: 'Out', type: 'json' }], config: demo('echo') }),
+  },
+  {
+    key: 'router', kind: 'router', label: 'Router', description: 'Conditional branch or dispatcher (diamond).',
+    build: (id, position) => node({ id, kind: 'router', label: 'Router', position, inputs: [{ id: 'in', label: 'In', type: 'any' }], outputs: [{ id: 'a', label: 'A', type: 'json' }, { id: 'b', label: 'B', type: 'json' }], config: demo('echo') }),
+  },
+  {
+    key: 'datastore', kind: 'datastore', label: 'Data store', description: 'Database, cache, vector index or queue (cylinder).',
+    build: (id, position) => node({ id, kind: 'datastore', label: 'Data store', position, inputs: [{ id: 'in', label: 'Write', type: 'any', required: false }], outputs: [{ id: 'out', label: 'Read', type: 'json' }], config: demo('echo') }),
+  },
+  {
+    key: 'group', kind: 'group', label: 'Group / ensemble', description: 'Container for related nodes, e.g. a judge council. Layout only, never executed.',
+    build: (id, position) => node({ id, kind: 'group', label: 'Group', position, display: { width: 300, height: 360 }, config: { implementation: { kind: 'none' } } }),
+  },
+  {
     key: 'empty', kind: 'worker', label: 'Empty worker', description: 'Blank node with no implementation (shows "Not configured").',
-    build: (id, position) => node({ id, kind: 'worker', label: 'New worker', position, inputs: [{ id: 'in', label: 'In', type: 'any' }], outputs: [{ id: 'out', label: 'Out', type: 'json' }], config: { implementation: { kind: 'none' } } }),
+    build: (id, position) => node({ id, kind: 'worker', label: 'New worker', position, inputs: [RULES_PORT, { id: 'in', label: 'In', type: 'any' }], outputs: [{ id: 'out', label: 'Out', type: 'json' }], config: { implementation: { kind: 'none' } } }),
   },
 ];
 
@@ -82,9 +105,9 @@ export function buildExampleWorkflow(now = new Date().toISOString()): Workflow {
     t('plan_combiner').build('n_plan_combiner', { x: X * 2, y: 220 }),
     t('scanner').build('n_scanner', { x: X * 3, y: 220 }),
     t('scene_worker').build('n_scene_worker', { x: X * 4, y: 220 }),
-    { ...t('judge').build('n_judge_coherence', { x: X * 5, y: 80 }), label: 'Judge: coherence' },
+    { ...t('judge').build('n_judge_coherence', { x: X * 5, y: 40 }), label: 'Judge: coherence' },
     { ...t('judge').build('n_judge_tension', { x: X * 5, y: 220 }), label: 'Judge: tension' },
-    { ...t('judge').build('n_judge_fidelity', { x: X * 5, y: 360 }), label: 'Judge: fidelity' },
+    { ...t('judge').build('n_judge_fidelity', { x: X * 5, y: 400 }), label: 'Judge: fidelity' },
     t('score_combiner').build('n_score_combiner', { x: X * 6, y: 220 }),
     t('results').build('n_results', { x: X * 7, y: 220 }),
   ];

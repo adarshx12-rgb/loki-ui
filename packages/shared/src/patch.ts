@@ -40,7 +40,12 @@ export const patchOpSchema = z.discriminatedUnion('op', [
   z.object({
     op: z.literal('set_node_display'),
     nodeId: idSchema,
-    display: z.object({ color: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(), collapsed: z.boolean().optional() }),
+    display: z.object({
+      color: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(),
+      collapsed: z.boolean().optional(),
+      width: z.number().int().min(80).max(6000).optional(),
+      height: z.number().int().min(60).max(6000).optional(),
+    }),
   }),
   z.object({ op: z.literal('append_node_note'), nodeId: idSchema, text: z.string().min(1).max(20_000), author: z.string().max(80).optional() }),
   z.object({ op: z.literal('add_edge'), edge: edgeSchema }),

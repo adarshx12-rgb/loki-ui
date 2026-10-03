@@ -11,6 +11,7 @@ import { openDatabase, type DB } from './db.js';
 import { makeResolver } from './executor/handlers.js';
 import { FileSync } from './filesync.js';
 import { GitHub } from './github.js';
+import { filesImportSchema, gitImportSchema, Importer } from './importer.js';
 import { Monitoring } from './monitoring.js';
 import { Projects } from './projects.js';
 import { RunManager } from './runs.js';
@@ -32,6 +33,7 @@ export interface AppContext {
   monitoring: Monitoring;
   github: GitHub;
   tasks: Tasks;
+  importer: Importer;
 }
 
 export function createContext(cfg: ServerConfig, opts: { dbFile?: string; fetchImpl?: typeof fetch; env?: NodeJS.ProcessEnv } = {}): AppContext {
@@ -50,7 +52,8 @@ export function createContext(cfg: ServerConfig, opts: { dbFile?: string; fetchI
   const files = new FileSync(db, bus, store, projects);
   const github = new GitHub(db, bus, cfg.github, opts.fetchImpl);
   const tasks = new Tasks(db, bus, store, runs);
-  return { cfg, db, bus, auth, store, runs, secrets, projects, files, monitoring, github, tasks };
+  const importer = new Importer(cfg.dataDir, projects, store);
+  return { cfg, db, bus, auth, store, runs, secrets, projects, files, monitoring, github, tasks, importer };
 }
 
 const CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
@@ -220,6 +223,10 @@ export async function buildApp(ctx: AppContext): Promise<FastifyInstance> {
   app.post<{ Params: P }>('/api/runs/:id/cancel', UI, async (req) => runs.cancel(req.params.id));
   app.get<{ Params: P }>('/api/workflows/:id/external-runs', UI_MCP, async (req) => ctx.monitoring.externalRuns(req.params.id));
 
+  // ---------------- repository import ----------------
+  app.post('/api/import/git', UI, async (req) => ctx.importer.fromGit(gitImportSchema.parse(req.body)));
+  app.post('/api/import/files', { ...UI, bodyLimit: 64 * 1024 * 1024 }, async (req) => ctx.importer.fromFiles(filesImportSchema.parse(req.body)));
+
   // ---------------- projects / secrets / settings ----------------
   app.get('/api/projects', UI_MCP, async () => ctx.projects.list());
   app.post('/api/projects', UI, async (req) => {
@@ -342,9 +349,10 @@ export async function buildApp(ctx: AppContext): Promise<FastifyInstance> {
 
   // ---------------- static web app ----------------
   if (cfg.webDist && fs.existsSync(path.join(cfg.webDist, 'index.html'))) {
-    await app.register(fastifyStatic, { root: cfg.webDist, wildcard: false });
+    // Wildcard serving looks files up per request, so a rebuilt web app (new hashed asset names) works without a restart.
+    await app.register(fastifyStatic, { root: cfg.webDist, wildcard: true });
     app.setNotFoundHandler((req, reply) => {
-      if (req.method === 'GET' && !req.url.startsWith('/api/')) {
+      if (req.method === 'GET' && !req.url.startsWith('/api/') && !req.url.startsWith('/assets/')) {
         return reply.sendFile('index.html');
       }
       return reply.code(404).send({ error: 'not_found' });

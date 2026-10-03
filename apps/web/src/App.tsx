@@ -3,13 +3,16 @@ import { ReactFlowProvider, useReactFlow } from '@xyflow/react';
 import { useStore } from './store';
 import { connectLive } from './sse';
 import { Toolbar } from './components/Toolbar';
-import { Palette } from './components/Palette';
 import { Canvas } from './components/Canvas';
 import { Inspector } from './inspector/Inspector';
 import { Timeline } from './components/Timeline';
 import { Connections } from './components/Connections';
 import { AskClaude, TaskDetail } from './components/AskClaude';
 import { ConflictBanner, HelpDialog, NewWorkflow, PairingScreen, Toasts, ValidateDialog } from './components/Dialogs';
+import { FloatingPanel } from './components/FloatingPanel';
+import { RightDock } from './components/RightDock';
+import { ImportProject } from './components/ImportProject';
+import { NodeSearch } from './components/NodeSearch';
 import { draftState } from './inspector/draft';
 
 export function App() {
@@ -34,24 +37,36 @@ function Workspace() {
   const dialog = useStore((s) => s.dialog);
   const openTaskId = useStore((s) => s.openTaskId);
   const wf = useStore((s) => s.wf);
+  const panels = useStore((s) => s.panels);
+  const togglePanel = useStore((s) => s.togglePanel);
   useShortcuts();
   return (
     <div className="app">
       <Toolbar />
       <ConflictBanner />
-      <div className="main">
-        <Palette />
-        <main className="center" aria-label="Workflow canvas">
+      <div className="stage">
+        <main className="stage-canvas" aria-label="Workflow canvas">
           <Canvas />
+          {panels.inspector && wf && (
+            <FloatingPanel id="inspector" title="Inspector" icon="☰" width={400} height={640} initial={() => ({ x: 72, y: 60 })} onClose={() => togglePanel('inspector', false)}>
+              <Inspector />
+            </FloatingPanel>
+          )}
+          {panels.logs && (
+            <div className="logs-drawer">
+              <Timeline onClose={() => togglePanel('logs', false)} />
+            </div>
+          )}
         </main>
-        <Inspector />
+        {wf && <RightDock />}
       </div>
-      <Timeline />
+      <NodeSearch />
       {dialog === 'connections' && <Connections />}
       {dialog === 'ask' && wf && <AskClaude />}
       {dialog === 'newWorkflow' && <NewWorkflow />}
       {dialog === 'validate' && <ValidateDialog />}
       {dialog === 'help' && <HelpDialog />}
+      {dialog === 'import' && <ImportProject />}
       {openTaskId && <TaskDetail />}
       <Toasts />
     </div>
@@ -67,14 +82,25 @@ function useShortcuts() {
       const t = e.target as HTMLElement;
       const typing = t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable;
       if (mod && e.key.toLowerCase() === 's') { e.preventDefault(); void draftState.save(); return; }
-      if (s.dialog || s.openTaskId) return; // modals handle their own keys
-      if (mod && e.key.toLowerCase() === 'k') { e.preventDefault(); document.getElementById('palette-search')?.focus(); return; }
+      if (s.dialog || s.openTaskId || s.nodeSearch) return; // modals handle their own keys
+      if (mod && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        const r = document.querySelector('.canvas')?.getBoundingClientRect();
+        s.set({ nodeSearch: r ? { x: r.left + r.width / 2 - 160, y: r.top + r.height / 3 } : { x: 200, y: 120 } });
+        return;
+      }
       if (mod && e.key === 'Enter') { e.preventDefault(); void s.startRun(); return; }
       if (typing) return;
       if (mod && e.key.toLowerCase() === 'z' && !e.shiftKey) { e.preventDefault(); void s.doUndo(); return; }
       if (mod && ((e.key.toLowerCase() === 'z' && e.shiftKey) || e.key.toLowerCase() === 'y')) { e.preventDefault(); void s.doRedo(); return; }
+      if (mod || e.altKey) return;
       if (e.key === 'Escape') { s.select(null); return; }
-      if (e.key === 'f' && !mod) { void rf.fitView({ padding: 0.15, duration: matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 200 }); return; }
+      if (e.key === 'f') { void rf.fitView({ padding: 0.15, duration: matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 200 }); return; }
+      if (e.key === 'i') { s.togglePanel('inspector'); return; }
+      if (e.key === 'H') { s.toggleRight('history'); return; }
+      const tool = ({ v: 'select', r: 'marquee', h: 'hand', n: 'node' } as const)[e.key as 'v' | 'r' | 'h' | 'n'];
+      if (tool) { s.setTool(tool); return; }
+      if (e.key === 'l') { s.togglePanel('logs'); return; }
       if (e.key === '?') { s.set({ dialog: 'help' }); }
     };
     window.addEventListener('keydown', onKey);

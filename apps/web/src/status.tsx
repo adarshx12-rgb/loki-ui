@@ -39,7 +39,31 @@ export function StatusChip({ status, title, small }: { status: string; title?: s
 
 export const KIND_ICON: Record<string, string> = {
   input: '⇥', planner: '◇', combiner: '⊕', scanner: '⌕', worker: '⚙', judge: '⚖', aggregator: 'Σ', api_service: '☁', model: '✦', output: '⇤',
+  instruction: '¶', auxiliary: '⋯', group: '▭', router: '◆', datastore: '⛁',
 };
+
+export type Dot = 'active' | 'running' | 'attention' | 'stopped' | 'idle' | 'external';
+
+/** Realtime dot on the bottom of every node. Colour + label so it is never colour-only. */
+export const DOT: Record<Dot, { label: string; hint: string }> = {
+  active: { label: 'Active', hint: 'Last run or telemetry succeeded' },
+  running: { label: 'Running', hint: 'Executing right now' },
+  attention: { label: 'Needs attention', hint: 'Retrying, skipped, stale, or has blocking issues' },
+  stopped: { label: 'Stopped', hint: 'Failed, cancelled or suspended' },
+  idle: { label: 'Idle', hint: 'No activity recorded yet' },
+  external: { label: 'Observed', hint: 'Handled by the original project; waiting for its telemetry' },
+};
+
+export function dotFor(status: string | undefined, blockingIssues: number): Dot {
+  switch (status) {
+    case 'running': case 'started': case 'queued': case 'pending': case 'claimed': case 'testing': return 'running';
+    case 'succeeded': case 'ok': case 'completed': return 'active';
+    case 'failed': case 'failing': case 'cancelled': case 'rejected': return 'stopped';
+    case 'retrying': case 'skipped': case 'stale': case 'awaiting_local_confirmation': return 'attention';
+    case 'observed': return 'external';
+  }
+  return blockingIssues > 0 ? 'attention' : 'idle';
+}
 
 export function implBadge(n: WorkflowNode): { text: string; tone: Tone; title: string } {
   const i = n.config.implementation;

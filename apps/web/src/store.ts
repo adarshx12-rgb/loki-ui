@@ -28,6 +28,8 @@ export interface Toast { id: number; kind: 'info' | 'error' | 'success'; text: s
 
 interface UndoEntry { label: string; before: Workflow; after: Workflow }
 
+export type Tool = 'select' | 'marquee' | 'hand' | 'node';
+
 type Overlay = { kind: 'local'; runId: string } | { kind: 'external'; serviceId: string; runId: string } | null;
 
 interface State {
@@ -40,6 +42,11 @@ interface State {
   execHash: string;
   selectedNodeId: string | null;
   selectedEdgeId: string | null;
+  /** Nodes selected together (rectangle selection). Empty when 0 or 1 node is selected. */
+  multiSelected: string[];
+  /** Active canvas tool. Connections can only be created or removed with the node tool. */
+  tool: Tool;
+  setTool(t: Tool): void;
   runs: RunSummary[];
   overlay: Overlay;
   runDetail: RunDetail | null;
@@ -53,7 +60,17 @@ interface State {
   conflict: Conflict | null;
   toasts: Toast[];
   remoteFlash: { nodeIds: string[]; actor: string; at: number } | null;
-  dialog: null | 'connections' | 'ask' | 'newWorkflow' | 'validate' | 'help';
+  dialog: null | 'connections' | 'ask' | 'newWorkflow' | 'validate' | 'help' | 'import';
+  /** Floating panels; the canvas is the only thing shown by default. */
+  panels: { inspector: boolean; logs: boolean };
+  /** Tab shown by the inspector (the note icon on a node jumps to 'notes'). */
+  inspectorTab: string;
+  /** Open section of the right-hand dock; null = collapsed to its icon rail. */
+  rightTab: string | null;
+  toggleRight(tab: string): void;
+  /** ComfyUI-style node search popup, at a screen position. */
+  nodeSearch: { x: number; y: number } | null;
+  togglePanel(p: keyof State['panels'], open?: boolean): void;
   connectionsTab: string;
   askTarget: { nodeId?: string } | null;
   openTaskId: string | null;
@@ -78,6 +95,15 @@ interface State {
   set(p: Partial<State>): void;
 }
 
+export const safeStorage = {
+  get(k: string): string | null {
+    try { return localStorage.getItem(k); } catch { return null; }
+  },
+  set(k: string, v: string) {
+    try { localStorage.setItem(k, v); } catch { /* storage unavailable */ }
+  },
+};
+
 let toastId = 1;
 let refreshTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -91,6 +117,10 @@ export const useStore = create<State>((set, get) => ({
   execHash: '',
   selectedNodeId: null,
   selectedEdgeId: null,
+  multiSelected: [],
+  tool: 'select',
+  // A leftover rectangle selection would sit on top of edges and swallow clicks, so the hand and node tools clear it.
+  setTool: (tool) => set(tool === 'hand' || tool === 'node' ? { tool, multiSelected: [] } : { tool }),
   runs: [],
   overlay: null,
   runDetail: null,
@@ -105,12 +135,25 @@ export const useStore = create<State>((set, get) => ({
   toasts: [],
   remoteFlash: null,
   dialog: null,
+  panels: { inspector: false, logs: false },
+  inspectorTab: 'overview',
+  rightTab: null,
+  nodeSearch: null,
   connectionsTab: 'projects',
   askTarget: null,
   openTaskId: null,
   bottomTab: 'events',
 
   set: (p) => set(p),
+
+  toggleRight(tab) {
+    set({ rightTab: get().rightTab === tab ? null : tab });
+  },
+
+  togglePanel(p, open) {
+    const panels = { ...get().panels, [p]: open ?? !get().panels[p] };
+    set({ panels });
+  },
 
   toast(kind, text) {
     const id = toastId++;
@@ -172,7 +215,7 @@ export const useStore = create<State>((set, get) => ({
   },
 
   select(nodeId, edgeId = null) {
-    set({ selectedNodeId: nodeId, selectedEdgeId: edgeId });
+    set({ selectedNodeId: nodeId, selectedEdgeId: edgeId, multiSelected: [] });
   },
 
   async patch(ops, label, opts = {}) {
@@ -235,7 +278,7 @@ export const useStore = create<State>((set, get) => ({
     if (!wf) return;
     try {
       const run = await api.post<RunSummary>(`/api/workflows/${enc(wf.id)}/runs`, { input, expectedRevision: wf.revision });
-      set({ runs: [run, ...get().runs], bottomTab: 'events' });
+      set({ runs: [run, ...get().runs.filter((r) => r.id !== run.id)], bottomTab: 'events' });
       await get().viewRun(run.id);
     } catch (e) {
       const err = e as ApiError;
@@ -369,12 +412,3 @@ function inverseOps(entry: UndoEntry, current: Workflow): PatchOp[] | string {
   }
   return ops;
 }
-
-export const safeStorage = {
-  get(k: string): string | null {
-    try { return localStorage.getItem(k); } catch { return null; }
-  },
-  set(k: string, v: string) {
-    try { localStorage.setItem(k, v); } catch { /* storage unavailable */ }
-  },
-};
