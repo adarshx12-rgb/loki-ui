@@ -1,0 +1,11 @@
+{
+  "name": "@nodepilot/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": { ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" } },
+  "scripts": { "build": "tsc -b" , "dev": "tsx watch src/index.ts", "start": "node dist/index.js" },
+  "dependencies": { "@nodepilot/shared": "0.1.0", "fastify": "^5.12.5", "@fastify/static": "^10.1.5", "chokidar": "^5.0.0", "zod": "^4.6.5" }
+}

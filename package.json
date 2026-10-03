@@ -1,0 +1,35 @@
+{
+  "name": "nodepilot",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "apps/*",
+    "examples/*"
+  ],
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "dev:server": "npm run dev -w @nodepilot/server",
+    "dev:web": "npm run dev -w @nodepilot/web",
+    "build": "npm run build -w @nodepilot/shared -w @nodepilot/instrument && npm run build -w @nodepilot/server -w @nodepilot/mcp -w @nodepilot/runner -w @nodepilot/example-backend -w @nodepilot/web",
+    "start": "node apps/server/dist/index.js",
+    "mcp": "node apps/mcp/dist/index.js",
+    "runner": "node apps/runner/dist/index.js",
+    "example-backend": "npm run start -w @nodepilot/example-backend",
+    "typecheck": "tsc -b packages/shared packages/instrument apps/server apps/mcp apps/runner examples/instrumented-backend && tsc -p apps/web --noEmit",
+    "test": "vitest run",
+    "pair": "node apps/server/dist/index.js pair",
+    "verify": "npm run typecheck && npm test && npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^24",
+    "playwright-core": "^1.63.0",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.3"
+  }
+}
