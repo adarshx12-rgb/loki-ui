@@ -63,11 +63,11 @@ export class WorkflowStore {
     if (!exists) this.insert(buildExampleWorkflow(), 'system', 'Seeded illustrative example');
   }
 
-  list(): { id: string; name: string; revision: number; isExample: boolean; nodeCount: number; updatedAt: string }[] {
+  list(): { id: string; name: string; revision: number; isExample: boolean; nodeCount: number; updatedAt: string; projectId?: string }[] {
     const rows = this.db.prepare('SELECT json FROM workflows ORDER BY updated_at DESC').all() as { json: string }[];
-    return rows.map((r) => {
-      const w = JSON.parse(r.json) as Workflow;
-      return { id: w.id, name: w.name, revision: w.revision, isExample: w.isExample, nodeCount: w.nodes.length, updatedAt: w.updatedAt };
+    // Simulation sandboxes are private scratch copies and never listed.
+    return rows.map((r) => JSON.parse(r.json) as Workflow).filter((w) => !w.simulationOf).map((w) => {
+      return { id: w.id, name: w.name, revision: w.revision, isExample: w.isExample, nodeCount: w.nodes.length, updatedAt: w.updatedAt, projectId: w.projectId };
     });
   }
 
@@ -132,6 +132,48 @@ export class WorkflowStore {
       this.audit(id, null, 0, actor, 'Deleted workflow', [], []);
     });
     this.bus.publish({ type: 'workflow.deleted', workflowId: id });
+  }
+
+  /**
+   * Deletes the workflow and everything recorded about it: runs and their events, proposals, Claude tasks,
+   * external telemetry, its linked-file record and its whole audit trail. Shared things (services, secrets,
+   * projects) are not touched. Callers should stop anything still running first.
+   */
+  purge(id: string): void {
+    this.get(id);
+    tx(this.db, () => {
+      const q = (sql: string) => this.db.prepare(sql).run(id);
+      q('DELETE FROM run_events WHERE run_id IN (SELECT id FROM runs WHERE workflow_id = ?)');
+      q('DELETE FROM runs WHERE workflow_id = ?');
+      q('DELETE FROM proposals WHERE workflow_id = ?');
+      q('DELETE FROM task_events WHERE task_id IN (SELECT id FROM tasks WHERE workflow_id = ?)');
+      q('DELETE FROM tasks WHERE workflow_id = ?');
+      q('DELETE FROM external_node_states WHERE workflow_id = ?');
+      q('DELETE FROM external_runs WHERE workflow_id = ?');
+      q('DELETE FROM telemetry_events WHERE workflow_id = ?');
+      q('DELETE FROM workflow_files WHERE workflow_id = ?');
+      q('DELETE FROM audit_log WHERE workflow_id = ?');
+      q('DELETE FROM workflows WHERE id = ?');
+    });
+    this.bus.publish({ type: 'workflow.deleted', workflowId: id });
+  }
+
+  /** The open simulation sandbox of a workflow, if any. */
+  simulationOf(mainId: string): Workflow | null {
+    const rows = this.db.prepare('SELECT json FROM workflows').all() as { json: string }[];
+    return rows.map((r) => JSON.parse(r.json) as Workflow).find((w) => w.simulationOf === mainId) ?? null;
+  }
+
+  /**
+   * Starts a simulation: a hidden copy of the workflow that can be edited and run freely.
+   * Any older sandbox of the same workflow is discarded first.
+   */
+  createSimulation(mainId: string, actor: Actor): Workflow {
+    const main = this.get(mainId);
+    if (main.simulationOf) throw new HttpError(409, 'already_simulation', 'This is already a simulation');
+    const old = this.simulationOf(mainId);
+    if (old) this.purge(old.id);
+    return this.importWorkflow({ ...main, id: newId('sim'), name: `${main.name} (simulation)`.slice(0, 120), simulationOf: mainId }, actor);
   }
 
   parseOps(raw: unknown): PatchOp[] {

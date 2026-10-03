@@ -14,7 +14,7 @@ import {
 } from '@nodepilot/shared';
 import { api, ApiError, enc } from './api';
 
-export interface WorkflowListItem { id: string; name: string; revision: number; isExample: boolean; nodeCount: number; updatedAt: string }
+export interface WorkflowListItem { id: string; name: string; revision: number; isExample: boolean; nodeCount: number; updatedAt: string; projectId?: string }
 export interface AuditEntry { id: number; fromRevision: number | null; toRevision: number; actor: string; summary: string; touchedNodes: string[]; createdAt: string }
 export interface Proposal { id: string; baseRevision: number; actor: string; title: string; summary: string; status: string; createdAt: string; validation: ValidationResult }
 export interface ExternalRun {
@@ -60,7 +60,20 @@ interface State {
   conflict: Conflict | null;
   toasts: Toast[];
   remoteFlash: { nodeIds: string[]; actor: string; at: number } | null;
-  dialog: null | 'connections' | 'ask' | 'newWorkflow' | 'validate' | 'help' | 'import';
+  dialog: null | 'connections' | 'ask' | 'newWorkflow' | 'validate' | 'help' | 'import' | 'deleteWorkflow' | 'simReview';
+  deleteTarget: { id: string; name: string; imported: boolean } | null;
+  /**
+   * Open simulation: edits and runs go to a hidden sandbox copy (`wf` is the sandbox).
+   * `base` is the project as it was when the simulation started, advanced by every change applied to main.
+   */
+  sim: { mainId: string; mainName: string; sandboxId: string; base: Workflow; mainRevision: number } | null;
+  startSimulation(): Promise<void>;
+  /** Pushes some simulation changes into the real project. Returns an error message, or null on success. */
+  applySimChanges(ops: PatchOp[], label: string): Promise<string | null>;
+  /** Leaves the simulation, discarding the sandbox and anything not applied. */
+  exitSimulation(): Promise<void>;
+  /** Permanently deletes a project: its workflow, history, and the demo copy of its files if it was imported. */
+  deleteWorkflow(id: string): Promise<boolean>;
   /** Floating panels; the canvas is the only thing shown by default. */
   panels: { inspector: boolean; logs: boolean };
   /** Tab shown by the inspector (the note icon on a node jumps to 'notes'). */
@@ -104,6 +117,15 @@ export const safeStorage = {
   },
 };
 
+/** The simulation baseline survives reloads in this browser. */
+const simStorage = {
+  save(sim: { sandboxId: string; base: Workflow }) { safeStorage.set(`np.sim.${sim.sandboxId}`, JSON.stringify(sim.base)); },
+  base(sandboxId: string): Workflow | null {
+    try { return JSON.parse(safeStorage.get(`np.sim.${sandboxId}`) ?? 'null') as Workflow | null; } catch { return null; }
+  },
+  clear(sandboxId: string) { try { localStorage.removeItem(`np.sim.${sandboxId}`); } catch { /* unavailable */ } },
+};
+
 let toastId = 1;
 let refreshTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -135,6 +157,8 @@ export const useStore = create<State>((set, get) => ({
   toasts: [],
   remoteFlash: null,
   dialog: null,
+  deleteTarget: null,
+  sim: null,
   panels: { inspector: false, logs: false },
   inspectorTab: 'overview',
   rightTab: null,
@@ -174,6 +198,67 @@ export const useStore = create<State>((set, get) => ({
     if (pick) await get().loadWorkflow(pick.id);
   },
 
+  async startSimulation() {
+    const main = get().wf;
+    if (!main || get().sim || main.simulationOf) return;
+    try {
+      const sandbox = await api.post<Workflow>(`/api/workflows/${enc(main.id)}/simulation`);
+      const sim = { mainId: main.id, mainName: main.name, sandboxId: sandbox.id, base: main, mainRevision: main.revision };
+      simStorage.save(sim);
+      set({ sim });
+      await get().loadWorkflow(sandbox.id);
+    } catch (e) {
+      get().toast('error', `Could not start the simulation: ${(e as Error).message}`);
+    }
+  },
+
+  async applySimChanges(ops, label) {
+    const sim = get().sim;
+    if (!sim || !ops.length) return null;
+    try {
+      const current = await api.get<{ workflow: Workflow }>(`/api/workflows/${enc(sim.mainId)}`);
+      const r = await api.post<{ workflow: Workflow }>(`/api/workflows/${enc(sim.mainId)}/patch`, { baseRevision: current.workflow.revision, ops });
+      // The baseline moves forward by the same changes, so applied ones drop off the list.
+      let base = sim.base;
+      try { base = applyPatch(sim.base, ops); } catch { base = r.workflow; }
+      const next = { ...sim, base, mainRevision: r.workflow.revision };
+      simStorage.save(next);
+      set({ sim: next });
+      void label;
+      return null;
+    } catch (e) {
+      return (e as Error).message;
+    }
+  },
+
+  async exitSimulation() {
+    const sim = get().sim;
+    if (!sim) return;
+    try { await api.del(`/api/workflows/${enc(sim.sandboxId)}`); } catch { /* already gone */ }
+    simStorage.clear(sim.sandboxId);
+    set({ sim: null, dialog: null });
+    await get().loadWorkflows();
+    await get().loadWorkflow(sim.mainId);
+  },
+
+  async deleteWorkflow(id) {
+    const name = get().workflows.find((w) => w.id === id)?.name ?? 'project';
+    try {
+      await api.del(`/api/workflows/${enc(id)}`);
+    } catch (e) {
+      get().toast('error', `Could not delete “${name}”: ${(e as Error).message}`);
+      return false;
+    }
+    await get().loadWorkflows();
+    if (get().wf?.id === id) {
+      const next = get().workflows[0];
+      if (next) await get().loadWorkflow(next.id);
+      else set({ wf: null, validation: null, execHash: '', selectedNodeId: null, selectedEdgeId: null, multiSelected: [], runs: [], overlay: null, runDetail: null, runEvents: [], externalRuns: [], audit: [], proposals: [], tasks: [], undo: [], redo: [], conflict: null });
+    }
+    get().toast('success', `Deleted “${name}”.`);
+    return true;
+  },
+
   async loadWorkflows() {
     set({ workflows: await api.get<WorkflowListItem[]>('/api/workflows') });
   },
@@ -187,8 +272,19 @@ export const useStore = create<State>((set, get) => ({
       execHash: r.executableHash,
       ...(changed ? { selectedNodeId: null, selectedEdgeId: null, undo: [], redo: [], overlay: null, runDetail: null, runEvents: [], conflict: null } : {}),
     });
-    safeStorage.set('np.lastWorkflow', id);
+    if (!r.workflow.simulationOf) safeStorage.set('np.lastWorkflow', id);
     await get().loadSide();
+    // A simulation left open (reload, closed tab) is picked up again.
+    if (!r.workflow.simulationOf && !get().sim) {
+      const open = await api.get<Workflow | null>(`/api/workflows/${enc(id)}/simulation`).catch(() => null);
+      if (open) {
+        const sim = { mainId: id, mainName: r.workflow.name, sandboxId: open.id, base: simStorage.base(open.id) ?? r.workflow, mainRevision: r.workflow.revision };
+        set({ sim });
+        get().toast('info', `Resumed the open simulation of “${r.workflow.name}”.`);
+        await get().loadWorkflow(open.id);
+        return;
+      }
+    }
     if (changed) {
       const latest = get().runs[0];
       if (latest) await get().viewRun(latest.id);

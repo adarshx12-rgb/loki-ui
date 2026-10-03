@@ -19,7 +19,7 @@ export function Modal({ title, onClose, children, wide }: { title: string; onClo
     return () => { window.removeEventListener('keydown', onKey, true); prev?.focus(); };
   }, [onClose]);
   return (
-    <div className="modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+    <div className="modal-backdrop nokey" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
       <div className={`modal${wide ? ' wide' : ''}`} role="dialog" aria-modal="true" aria-label={title} ref={ref}>
         <div className="modal-head">
           <h2>{title}</h2>

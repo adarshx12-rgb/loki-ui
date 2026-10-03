@@ -56,6 +56,10 @@ export const NODE_KINDS = [
   'router',
   /** Database, cache, vector index or queue; rendered as a cylinder. */
   'datastore',
+  /** A generic module, folder or step of a project; makes no claim about what it does. */
+  'module',
+  /** User-facing screens and components. */
+  'ui',
 ] as const;
 export const nodeKindSchema = z.enum(NODE_KINDS);
 export type NodeKind = z.infer<typeof nodeKindSchema>;
@@ -214,6 +218,8 @@ export const workflowSchema = z.object({
   revision: z.number().int().min(0),
   /** True for the bundled illustrative example. */
   isExample: z.boolean().default(false),
+  /** Set on a simulation sandbox: the id of the workflow it was copied from. Sandboxes are hidden from lists. */
+  simulationOf: idSchema.optional(),
   /** ID of an approved project root used to resolve code references. */
   projectId: idSchema.optional(),
   nodes: z.array(nodeSchema).max(500),

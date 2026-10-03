@@ -152,13 +152,27 @@ export async function buildApp(ctx: AppContext): Promise<FastifyInstance> {
     return store.create(body, actorFor(req));
   });
   app.post('/api/workflows/import', UI, async (req) => store.importWorkflow(req.body, 'ui'));
+  // Simulation sandboxes: start one (replacing any old one) or find the open one after a reload.
+  app.post<{ Params: P }>('/api/workflows/:id/simulation', UI, async (req) => store.createSimulation(req.params.id, 'ui'));
+  app.get<{ Params: P }>('/api/workflows/:id/simulation', UI, async (req) => store.simulationOf(req.params.id));
   app.get<{ Params: P }>('/api/workflows/:id', UI_MCP, async (req) => {
     const wf = store.get(req.params.id);
     return { workflow: wf, validation: store.validate(wf), executableHash: executableHash(wf) };
   });
   app.delete<{ Params: P }>('/api/workflows/:id', UI, async (req) => {
-    store.delete(req.params.id, 'ui');
-    return { ok: true };
+    const id = req.params.id;
+    const wf = store.get(id);
+    // Stop anything still working on it so nothing writes back after it is gone.
+    for (const r of runs.list(id, 500)) if (r.status === 'running' || r.status === 'queued') { try { runs.cancel(r.id); } catch { /* finished meanwhile */ } }
+    for (const t of ctx.tasks.list({ workflowId: id })) { try { ctx.tasks.requestCancel(t.id); } catch { /* already finished */ } }
+    ctx.files.unlink(id);
+    // An open simulation of this project goes with it.
+    const sandbox = store.simulationOf(id);
+    if (sandbox) store.purge(sandbox.id);
+    store.purge(id);
+    const stillUsed = !!wf.projectId && store.list().some((w) => w.projectId === wf.projectId);
+    const removedCopy = ctx.importer.removeDemoCopy(wf.projectId, stillUsed);
+    return { ok: true, removedCopy };
   });
   app.post<{ Params: P }>('/api/workflows/:id/patch', UI_MCP, async (req) => {
     const body = patchBodySchema.extend({ dryRun: z.boolean().optional() }).parse(req.body);

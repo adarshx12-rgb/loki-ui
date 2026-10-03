@@ -2,61 +2,38 @@ import path from 'node:path';
 import { nodeSchema, RULES_PORT, type NodeKind, type WorkflowEdge, type WorkflowNode } from '@nodepilot/shared';
 
 /**
- * Heuristic repository → initial workflow graph.
+ * Heuristic repository → initial workflow graph. It never executes the code.
  *
- * It does not execute or understand the code. It classifies source files by name
- * (and a few content signals) into pipeline stages, picks up model identifiers that
- * appear in each file, and lays the stages out left → right:
+ * Two layouts:
+ *  - **structure** (default for most projects): the project's real modules (folders, or files in
+ *    flat folders) with arrows following which code uses which. Entry points (API routes, pages,
+ *    main/cli) sit on the left, the modules they use to the right, external services (databases,
+ *    LLM providers, third-party APIs) last. Nothing is assumed about what the project does.
+ *  - **pipeline**: for AI pipelines where file names *and* code clearly show stages
+ *    (planner, judge, critic, screener…): I/P → rules → router → planner → discover → [screen]
+ *    → inspect → judge → rank → O/P (→ critic).
  *
- *   I/P → rules → router → planner → discover → [screen] → inspect → judge → rank → O/P (→ critic)
- *
- * Data stores and model clients become side nodes. Everything is a starting point the
- * user is expected to edit; every node carries a code reference to its source file.
+ * `auto` picks pipeline only on strong evidence. Every node carries code references back to its files.
  */
 
 export interface SourceFile { path: string; content: string }
+export type AnalysisMode = 'auto' | 'structure' | 'pipeline';
 
 export interface AnalysisResult {
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
-  stats: { filesScanned: number; filesMatched: number; models: string[]; languages: string[] };
+  stats: { filesScanned: number; filesMatched: number; models: string[]; languages: string[]; mode: 'structure' | 'pipeline'; reason: string; hiddenModules: number };
 }
 
-type Role = 'rules' | 'router' | 'planner' | 'discover' | 'screen' | 'inspect' | 'judge' | 'rank' | 'critic' | 'store' | 'client';
-
-interface RoleRule { role: Role; kind: NodeKind; re: RegExp; label: string }
-
-/** Order matters: first match wins. Matched against the lower-cased file stem and its parent directory. */
-const RULES: RoleRule[] = [
-  { role: 'critic', kind: 'judge', re: /critic|audit/, label: 'Critic' },
-  { role: 'screen', kind: 'auxiliary', re: /screen|prefilter|pre-?judge|triage|guard|safety/, label: 'Screener' },
-  { role: 'judge', kind: 'judge', re: /judge|cascade|council|(^|[-_])review|verif|grader|grading|scorer|evaluator|rerank/, label: 'Judge' },
-  { role: 'client', kind: 'api_service', re: /model-?client|openai|anthropic|gemini|llm|provider|ollama|openrouter|completion/, label: 'Model client' },
-  { role: 'router', kind: 'router', re: /(^|[-_])router$|routing|dispatch|classif/, label: 'Router' },
-  { role: 'rules', kind: 'instruction', re: /prompt|rewrite|rules?$|policy|policies|guideline|instruction|contract|requirement|persona|template/, label: 'Rules' },
-  { role: 'planner', kind: 'planner', re: /plan/, label: 'Planner' },
-  { role: 'discover', kind: 'scanner', re: /discover|retriev|crawl|scrap|search$|sources?$|fetch|explor|hunt|expansion|ingest|loader|connector/, label: 'Discover' },
-  { role: 'inspect', kind: 'worker', re: /scene|caption|transcri|render|extract|inspect|pdf|preview|ocr|moment|whisper|vision|parse|summar|agent|worker|tool/, label: 'Inspect' },
-  { role: 'rank', kind: 'aggregator', re: /rank|dedup|duplicate|merge|combin|aggregat|refill|fusion|canonical|corroborat|result/, label: 'Rank' },
-  { role: 'store', kind: 'datastore', re: /^db$|database|cache|embedding|vector|store$|queue|repository|memory|index$/, label: 'Store' },
-];
-
-/** Generic module names that say nothing about a pipeline stage. */
-const GENERIC = /^(config|settings|cli|main|index|app|utils?|helpers?|types?|constants?|common|shared|lib|core|__init__|setup|env|logger|logging|errors?|http|server)$/;
-
-/** Left → right column for each main-line role. */
-const STAGE: Partial<Record<Role, number>> = { router: 1, planner: 2, discover: 3, inspect: 4, judge: 5, rank: 6 };
-
-const SOURCE_EXT = new Set(['.ts', '.tsx', '.js', '.mjs', '.cjs', '.jsx', '.py', '.go', '.rs', '.java', '.kt', '.rb', '.php', '.cs', '.swift']);
+const SOURCE_EXT = new Set(['.ts', '.tsx', '.js', '.mjs', '.cjs', '.jsx', '.py', '.go', '.rs', '.java', '.kt', '.rb', '.php', '.cs', '.swift', '.vue', '.svelte']);
 const PROMPT_EXT = new Set(['.md', '.txt', '.prompt', '.yaml', '.yml', '.j2', '.jinja', '.hbs', '.mustache']);
-const SKIP_DIR = /(^|\/)(node_modules|\.git|dist|build|out|coverage|vendor|venv|\.venv|__pycache__|\.next|target|migrations?|fixtures?|__tests__|tests?|spec|e2e|examples?|docs?|scripts?|public|static|assets)(\/|$)/i;
+/** Dependencies, build output, tests, docs, virtualenvs (any folder with "venv" in its name), site-packages and hidden folders. */
+const SKIP_DIR = /(^|\/)(node_modules|dist|build|out|coverage|vendor|__pycache__|target|migrations?|fixtures?|__tests__|tests?|spec|e2e|examples?|docs?|scripts?|public|static|assets|site-packages|[^/]*venv[^/]*|\.[^/]+)(\/|$)/i;
 const SKIP_FILE = /(\.test\.|\.spec\.|\.d\.ts$|^setup\.|config\.(js|ts|cjs|mjs)$|eslint|prettier|vite|webpack|rollup|jest|vitest)/i;
-const ENTRY = /^(main|index|app|server|api|cli|handler|routes?|__main__|wsgi|asgi)$/;
-
-const MAX_PER_STAGE = 6;
-const MAX_SIDE = 6;
 const COL = 300;
 const ROW = 200;
+
+// ------------------------------------------------------------------ shared helpers
 
 // Model ids are lower-case and carry a version number (gemini-3.8-flash, openai/gpt-6-luna, claude-haiku-4.5, kimi-k3).
 const MODEL_RE = [
@@ -81,19 +58,7 @@ function stem(p: string) {
 }
 
 function titleCase(s: string) {
-  return s.replace(/[-_.]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()).trim();
-}
-
-function classify(file: SourceFile): RoleRule | null {
-  const s = stem(file.path);
-  const dir = path.posix.basename(path.posix.dirname(file.path)).toLowerCase();
-  const ext = path.posix.extname(file.path).toLowerCase();
-  if (PROMPT_EXT.has(ext)) {
-    // Only prompt-like documents count (README etc. are skipped).
-    return /prompt|rules?|policy|instruction|system|persona|template/.test(`${dir}/${s}`) ? RULES.find((r) => r.role === 'rules')! : null;
-  }
-  if (GENERIC.test(s)) return null;
-  return RULES.find((r) => r.re.test(s)) ?? RULES.find((r) => r.role !== 'rules' && r.role !== 'store' && r.role !== 'client' && r.re.test(dir)) ?? null;
+  return s.replace(/[-_.]+/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2').replace(/\b\w/g, (c) => c.toUpperCase()).trim();
 }
 
 /**
@@ -115,139 +80,298 @@ export function promptText(file: SourceFile): string {
   return (body || `Rules and prompt construction live in ${file.path}.`).slice(0, 4000);
 }
 
-/** Import specifiers → repository paths (best effort, relative imports only). */
-function importsOf(file: SourceFile, known: Map<string, string>): Set<string> {
-  const out = new Set<string>();
+/** Local imports → repository paths, plus bare package names. Handles relative imports, "@/…" and "~/…" aliases, and Python packages. */
+function importsOf(file: SourceFile, known: Map<string, string>, workspace: Map<string, string>): { local: Set<string>; packages: Set<string> } {
+  const local = new Set<string>();
+  const packages = new Set<string>();
   const dir = path.posix.dirname(file.path);
-  const re = /(?:from\s+['"](\.{1,2}\/[^'"]+)['"]|require\(\s*['"](\.{1,2}\/[^'"]+)['"]\s*\)|import\(\s*['"](\.{1,2}\/[^'"]+)['"]\s*\)|^\s*from\s+\.+([\w.]+)\s+import)/gm;
+  const resolve = (base: string) => {
+    const b = path.posix.normalize(base).replace(/\.(js|mjs|cjs|ts|tsx|jsx|vue|svelte)$/, '');
+    return known.get(b) ?? known.get(`${b}/index`) ?? known.get(`src/${b}`) ?? known.get(`src/${b}/index`);
+  };
+  if (/\.(py)$/.test(file.path)) {
+    for (const m of file.content.matchAll(/^\s*(?:from\s+(\.*[\w.]*)\s+import|import\s+([\w.]+))/gm)) {
+      const spec = m[1] ?? m[2] ?? '';
+      if (spec.startsWith('.')) {
+        const up = spec.match(/^\.+/)![0].length - 1;
+        const base = path.posix.join(dir, ...Array(up).fill('..'), spec.replace(/^\.+/, '').replace(/\./g, '/'));
+        const hit = known.get(base) ?? known.get(`${base}/__init__`);
+        if (hit) local.add(hit);
+      } else if (spec) {
+        const asPath = spec.replace(/\./g, '/');
+        const hit = known.get(asPath) ?? known.get(`${asPath}/__init__`) ?? known.get(path.posix.join(dir, asPath));
+        if (hit) local.add(hit);
+        else packages.add(spec.split('.').slice(0, 2).join('.'));
+      }
+    }
+    return { local, packages };
+  }
+  const re = /(?:import\s[^'"`;]*?from\s*|import\s*\(?\s*|require\(\s*|export\s[^'"`;]*?from\s*)['"]([^'"]+)['"]/g;
   for (const m of file.content.matchAll(re)) {
-    const spec = m[1] ?? m[2] ?? m[3];
-    if (spec) {
-      const base = path.posix.normalize(path.posix.join(dir, spec)).replace(/\.(js|mjs|cjs|ts|tsx|jsx)$/, '');
-      const hit = known.get(base) ?? known.get(`${base}/index`);
-      if (hit) out.add(hit);
-    } else if (m[4]) {
-      const hit = known.get(path.posix.join(dir, m[4].replace(/\./g, '/')));
-      if (hit) out.add(hit);
+    const spec = m[1];
+    if (spec.startsWith('.')) {
+      const hit = resolve(path.posix.join(dir, spec));
+      if (hit) local.add(hit);
+    } else if (spec.startsWith('@/') || spec.startsWith('~/')) {
+      const hit = resolve(spec.slice(2));
+      if (hit) local.add(hit);
+    } else if (!spec.startsWith('/') && !spec.startsWith('node:')) {
+      const pkg = spec.startsWith('@') ? spec.split('/').slice(0, 2).join('/') : spec.split('/')[0];
+      // The project's own workspace packages ("@acme/shared", "@acme/shared/node") are local code.
+      const wsDir = workspace.get(pkg);
+      if (wsDir !== undefined) {
+        const sub = spec.slice(pkg.length).replace(/^\//, '');
+        const hit = sub
+          ? resolve(path.posix.join(wsDir, 'src', sub)) ?? resolve(path.posix.join(wsDir, sub))
+          : resolve(path.posix.join(wsDir, 'src', 'index')) ?? resolve(path.posix.join(wsDir, 'index'));
+        if (hit) { local.add(hit); continue; }
+      }
+      packages.add(pkg);
     }
   }
-  return out;
+  return { local, packages };
 }
 
-interface Candidate { file: SourceFile; rule: RoleRule; models: string[]; score: number; importedBy: number }
+interface Prepared {
+  usable: SourceFile[];
+  known: Map<string, string>;
+  imports: Map<string, Set<string>>;
+  packages: Map<string, Set<string>>;
+  models: Map<string, string[]>;
+  allModels: Set<string>;
+  languages: string[];
+}
 
-export function analyzeRepository(files: SourceFile[], opts: { serviceId: string; projectName: string }): AnalysisResult {
+function prepare(files: SourceFile[]): Prepared {
+  // package.json names → folders, so imports between a monorepo's own packages are followed.
+  const workspace = new Map<string, string>();
+  for (const f of files) {
+    const p = f.path.replace(/\\/g, '/').replace(/^\.?\//, '');
+    if (path.posix.basename(p) !== 'package.json' || /(^|\/)node_modules\//.test(p)) continue;
+    try {
+      const name = (JSON.parse(f.content) as { name?: unknown }).name;
+      if (typeof name === 'string' && name) workspace.set(name, path.posix.dirname(p) === '.' ? '' : path.posix.dirname(p));
+    } catch { /* not JSON */ }
+  }
   const usable = files
     .map((f) => ({ ...f, path: f.path.replace(/\\/g, '/').replace(/^\.?\//, '') }))
     .filter((f) => !SKIP_DIR.test(path.posix.dirname(f.path) + '/') && !SKIP_FILE.test(path.posix.basename(f.path)))
     .filter((f) => SOURCE_EXT.has(path.posix.extname(f.path).toLowerCase()) || PROMPT_EXT.has(path.posix.extname(f.path).toLowerCase()));
-
   const known = new Map<string, string>();
   for (const f of usable) known.set(f.path.replace(/\.[^.]+$/, ''), f.path);
-  const imports = new Map(usable.map((f) => [f.path, importsOf(f, known)]));
-  const importedBy = new Map<string, number>();
-  for (const set of imports.values()) for (const p of set) importedBy.set(p, (importedBy.get(p) ?? 0) + 1);
-
+  const imports = new Map<string, Set<string>>();
+  const packages = new Map<string, Set<string>>();
+  const models = new Map<string, string[]>();
   const allModels = new Set<string>();
-  const candidates: Candidate[] = [];
   for (const f of usable) {
-    const models = detectModels(f.content);
-    models.forEach((m) => allModels.add(m));
-    const rule = classify(f);
-    if (!rule) continue;
-    const s = stem(f.path);
-    const score = (models.length ? 3 : 0) + (rule.re.test(s) ? 2 : 0) + Math.min(importedBy.get(f.path) ?? 0, 4) + Math.min(f.content.length / 8000, 2);
-    candidates.push({ file: f, rule, models, score, importedBy: importedBy.get(f.path) ?? 0 });
+    const r = importsOf(f, known, workspace);
+    imports.set(f.path, r.local);
+    packages.set(f.path, r.packages);
+    const m = detectModels(f.content);
+    models.set(f.path, m);
+    m.forEach((x) => allModels.add(x));
+  }
+  const languages = [...new Set(usable.map((f) => path.posix.extname(f.path).slice(1).toLowerCase()).filter((e) => SOURCE_EXT.has(`.${e}`)))];
+  return { usable, known, imports, packages, models, allModels, languages };
+}
+
+/** Third-party packages and hosts → the external service they represent. */
+const EXTERNALS: { re: RegExp; label: string; kind: NodeKind; llm?: boolean }[] = [
+  { re: /^@supabase\/|^supabase$/, label: 'Supabase', kind: 'datastore' },
+  { re: /^(pg|postgres|@neondatabase\/serverless|@vercel\/postgres|psycopg2?|asyncpg|sqlalchemy)$/, label: 'PostgreSQL', kind: 'datastore' },
+  { re: /^(@prisma\/client|prisma)$/, label: 'Database (Prisma)', kind: 'datastore' },
+  { re: /^drizzle-orm/, label: 'Database (Drizzle)', kind: 'datastore' },
+  { re: /^(mongoose|mongodb|pymongo|motor)$/, label: 'MongoDB', kind: 'datastore' },
+  { re: /^(redis|ioredis|@upstash\/redis|aioredis)$/, label: 'Redis', kind: 'datastore' },
+  { re: /^(better-sqlite3|sqlite3|sqlite)$/, label: 'SQLite', kind: 'datastore' },
+  { re: /^(firebase|firebase-admin|@firebase\/.+)$/, label: 'Firebase', kind: 'datastore' },
+  { re: /^(@pinecone-database\/pinecone|pinecone|chromadb|qdrant-client|@qdrant\/js-client-rest|weaviate-client)$/, label: 'Vector database', kind: 'datastore' },
+  { re: /^openai$/, label: 'OpenAI', kind: 'api_service', llm: true },
+  { re: /^(@anthropic-ai\/sdk|anthropic)$/, label: 'Anthropic', kind: 'api_service', llm: true },
+  { re: /^(@google\/genai|@google\/generative-ai|google\.genai|google\.generativeai)$/, label: 'Google Gemini', kind: 'api_service', llm: true },
+  { re: /^(groq-sdk|groq)$/, label: 'Groq', kind: 'api_service', llm: true },
+  { re: /^ollama$/, label: 'Ollama', kind: 'api_service', llm: true },
+  { re: /^(@openrouter\/.+|openrouter)$/, label: 'OpenRouter', kind: 'api_service', llm: true },
+  { re: /^(langchain|@langchain\/.+)$/, label: 'LangChain', kind: 'api_service', llm: true },
+  { re: /^(ai|@ai-sdk\/.+)$/, label: 'Vercel AI SDK', kind: 'api_service', llm: true },
+  { re: /^(transformers|torch|@xenova\/transformers|@huggingface\/.+|huggingface_hub)$/, label: 'Hugging Face / local models', kind: 'api_service', llm: true },
+  { re: /^(youtube-transcript.*|youtube_transcript_api|ytdl-core|@distube\/ytdl-core|yt_dlp|youtubei\.js|youtubei)$/, label: 'YouTube', kind: 'api_service' },
+  { re: /^googleapis$/, label: 'Google APIs', kind: 'api_service' },
+  { re: /^stripe$/, label: 'Stripe', kind: 'api_service' },
+  { re: /^(resend|nodemailer|@sendgrid\/mail)$/, label: 'Email', kind: 'api_service' },
+  { re: /^(@aws-sdk\/.+|boto3|aws-sdk)$/, label: 'AWS', kind: 'api_service' },
+  { re: /^(@clerk\/.+|next-auth|@auth\/.+)$/, label: 'Auth provider', kind: 'api_service' },
+];
+const HOST_RE = /https:\/\/((?:api\.)[a-z0-9.-]+\.[a-z]{2,}|[a-z0-9-]+\.supabase\.co|generativelanguage\.googleapis\.com|openrouter\.ai|api\.openai\.com)/g;
+
+function externalFor(pkg: string) {
+  return EXTERNALS.find((e) => e.re.test(pkg));
+}
+
+// ------------------------------------------------------------------ graph builder
+
+class GraphBuilder {
+  nodes: WorkflowNode[] = [];
+  edges: WorkflowEdge[] = [];
+  private usedIds = new Set<string>();
+  private edgeN = 0;
+  constructor(readonly serviceId: string) {}
+
+  idFor(base: string) {
+    const clean = base.replace(/[^A-Za-z0-9_-]/g, '_').replace(/_+/g, '_').slice(0, 50) || 'node';
+    let id = `n_${clean}`;
+    for (let i = 2; this.usedIds.has(id); i++) id = `n_${clean.slice(0, 46)}_${i}`;
+    this.usedIds.add(id);
+    return id;
   }
 
+  edge(source: string, sourcePort: string, target: string, targetPort: string) {
+    if (source === target || this.edges.some((e) => e.source === source && e.target === target && e.targetPort === targetPort)) return;
+    this.edges.push({ id: `e${++this.edgeN}`, source, sourcePort, target, targetPort });
+  }
+
+  get observed() {
+    return { implementation: { kind: 'observed' as const, serviceId: this.serviceId } };
+  }
+
+  uniqueLabel(label: string, hint: string) {
+    return this.nodes.some((x) => x.label === label) ? `${label} (${hint})` : label;
+  }
+}
+
+const IN_PORT = { id: 'in', label: 'In', type: 'any' as const, required: false, multiple: true, merge: 'object_by_source' as const };
+const OUT_PORT = { id: 'out', label: 'Out', type: 'json' as const };
+
+// ------------------------------------------------------------------ pipeline layout
+
+type Role = 'rules' | 'router' | 'planner' | 'discover' | 'screen' | 'inspect' | 'judge' | 'rank' | 'critic' | 'store' | 'client';
+interface RoleRule { role: Role; kind: NodeKind; re: RegExp; label: string }
+
+/** Order matters: first match wins. Matched against the lower-cased file stem and its parent directory. */
+const RULES: RoleRule[] = [
+  { role: 'critic', kind: 'judge', re: /critic|audit/, label: 'Critic' },
+  { role: 'screen', kind: 'auxiliary', re: /screen|prefilter|pre-?judge|triage|guard|safety/, label: 'Screener' },
+  { role: 'judge', kind: 'judge', re: /judge|cascade|council|(^|[-_])review|verif|grader|grading|scorer|evaluator|rerank/, label: 'Judge' },
+  { role: 'client', kind: 'api_service', re: /model-?client|openai|anthropic|gemini|llm|provider|ollama|openrouter|completion/, label: 'Model client' },
+  { role: 'router', kind: 'router', re: /(^|[-_])router$|routing|dispatch|classif/, label: 'Router' },
+  { role: 'rules', kind: 'instruction', re: /prompt|rewrite|rules?$|policy|policies|guideline|instruction|contract|requirement|persona|template/, label: 'Rules' },
+  { role: 'planner', kind: 'planner', re: /plan/, label: 'Planner' },
+  { role: 'discover', kind: 'scanner', re: /discover|retriev|crawl|scrap|search$|sources?$|fetch|explor|hunt|expansion|ingest|loader|connector/, label: 'Discover' },
+  { role: 'inspect', kind: 'worker', re: /scene|caption|transcri|render|extract|inspect|pdf|preview|ocr|moment|whisper|vision|parse|summar|agent|worker|tool/, label: 'Inspect' },
+  { role: 'rank', kind: 'aggregator', re: /rank|dedup|duplicate|merge|combin|aggregat|refill|fusion|canonical|corroborat|result/, label: 'Rank' },
+  { role: 'store', kind: 'datastore', re: /^db$|database|cache|embedding|vector|store$|queue|repository|memory|index$/, label: 'Store' },
+];
+/** Generic module names that say nothing about a pipeline stage. */
+const GENERIC = /^(config|settings|cli|main|index|app|utils?|helpers?|types?|constants?|common|shared|lib|core|__init__|setup|env|logger|logging|errors?|http|server|page|layout|route)$/;
+const STAGE: Partial<Record<Role, number>> = { router: 1, planner: 2, discover: 3, inspect: 4, judge: 5, rank: 6 };
+const PIPELINE_ENTRY = /^(main|index|app|server|api|cli|handler|routes?|__main__|wsgi|asgi)$/;
+const UI_EXT = /\.(tsx|jsx|vue|svelte)$/;
+
+function classify(file: SourceFile): RoleRule | null {
+  const s = stem(file.path);
+  const dir = path.posix.basename(path.posix.dirname(file.path)).toLowerCase();
+  const ext = path.posix.extname(file.path).toLowerCase();
+  if (PROMPT_EXT.has(ext)) {
+    // Only prompt-like documents count (README etc. are skipped).
+    return /prompt|rules?|policy|instruction|system|persona|template/.test(`${dir}/${s}`) ? RULES.find((r) => r.role === 'rules')! : null;
+  }
+  // UI components are never pipeline stages ("ResultCard" is not a ranking step).
+  if (GENERIC.test(s) || UI_EXT.test(file.path)) return null;
+  return RULES.find((r) => r.re.test(s)) ?? RULES.find((r) => r.role !== 'rules' && r.role !== 'store' && r.role !== 'client' && r.re.test(dir)) ?? null;
+}
+
+/** Strong evidence of an AI pipeline: ≥2 distinct decision stages named in files that also talk to models. */
+function pipelineEvidence(p: Prepared): { yes: boolean; reason: string } {
+  const llmFiles = new Set(p.usable.filter((f) => (p.models.get(f.path)?.length ?? 0) > 0 || [...(p.packages.get(f.path) ?? [])].some((k) => externalFor(k)?.llm)).map((f) => f.path));
+  const roles = new Set<string>();
+  for (const f of p.usable) {
+    const r = classify(f);
+    if (!r || !['planner', 'judge', 'critic', 'screen'].includes(r.role) || !r.re.test(stem(f.path))) continue;
+    // The stage file, or something it imports, must call a model.
+    const touchesLlm = llmFiles.has(f.path) || [...(p.imports.get(f.path) ?? [])].some((d) => llmFiles.has(d));
+    if (touchesLlm) roles.add(r.label);
+  }
+  return roles.size >= 2
+    ? { yes: true, reason: `AI pipeline stages found in the code: ${[...roles].join(', ')}` }
+    : { yes: false, reason: roles.size ? `only one AI stage found (${[...roles][0]}), so the real code structure is shown` : 'no AI pipeline stages found, so the real code structure is shown' };
+}
+
+interface Candidate { file: SourceFile; rule: RoleRule; models: string[]; score: number }
+
+function analyzePipeline(p: Prepared, g: GraphBuilder, opts: { projectName: string }) {
+  const { usable, imports } = p;
+  const importedBy = new Map<string, number>();
+  for (const set of imports.values()) for (const x of set) importedBy.set(x, (importedBy.get(x) ?? 0) + 1);
+
   const byRole = new Map<Role, Candidate[]>();
-  for (const c of candidates) {
-    const list = byRole.get(c.rule.role) ?? [];
-    list.push(c);
-    byRole.set(c.rule.role, list);
+  for (const f of usable) {
+    const rule = classify(f);
+    if (!rule) continue;
+    const models = p.models.get(f.path) ?? [];
+    const score = (models.length ? 3 : 0) + (rule.re.test(stem(f.path)) ? 2 : 0) + Math.min(importedBy.get(f.path) ?? 0, 4) + Math.min(f.content.length / 8000, 2);
+    const list = byRole.get(rule.role) ?? [];
+    list.push({ file: f, rule, models, score });
+    byRole.set(rule.role, list);
   }
   for (const [role, list] of byRole) {
     list.sort((a, b) => b.score - a.score || a.file.path.localeCompare(b.file.path));
-    const cap = role === 'store' || role === 'client' ? MAX_SIDE : role === 'critic' ? 1 : role === 'rules' ? 4 : MAX_PER_STAGE;
+    const cap = role === 'store' || role === 'client' ? 6 : role === 'critic' ? 1 : role === 'rules' ? 4 : 6;
     byRole.set(role, list.slice(0, cap));
   }
 
-  const nodes: WorkflowNode[] = [];
-  const edges: WorkflowEdge[] = [];
-  const usedIds = new Set<string>();
-  const idFor = (base: string) => {
-    let id = `n_${base.replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 50)}`;
-    for (let i = 2; usedIds.has(id); i++) id = `n_${base.slice(0, 46)}_${i}`;
-    usedIds.add(id);
-    return id;
-  };
-  let edgeN = 0;
-  const edge = (source: string, sourcePort: string, target: string, targetPort: string) => {
-    if (edges.some((e) => e.source === source && e.target === target && e.targetPort === targetPort)) return;
-    edges.push({ id: `e${++edgeN}`, source, sourcePort, target, targetPort });
-  };
-  const observed = { implementation: { kind: 'observed' as const, serviceId: opts.serviceId } };
-  const inPort = { id: 'in', label: 'In', type: 'any' as const, required: false, multiple: true, merge: 'object_by_source' as const };
-  const outPort = { id: 'out', label: 'Out', type: 'json' as const };
-  const fileOf = new Map<string, string>(); // node id → file path
-
+  const fileOf = new Map<string, string>();
   const make = (c: Candidate, position: { x: number; y: number }): WorkflowNode => {
     const s = stem(c.file.path);
-    const id = idFor(s);
+    const id = g.idFor(s);
     fileOf.set(id, c.file.path);
     const kind = c.rule.kind;
     const isInstruction = kind === 'instruction';
     const takesRules = kind === 'planner' || kind === 'worker' || kind === 'judge' || kind === 'scanner' || kind === 'aggregator' || kind === 'router';
-    let label = titleCase(s);
-    if (nodes.some((x) => x.label === label)) label = `${label} (${path.posix.basename(path.posix.dirname(c.file.path)) || 'root'})`;
     const n = nodeSchema.parse({
       id,
       kind,
-      label: label.slice(0, 120),
+      label: g.uniqueLabel(titleCase(s), path.posix.basename(path.posix.dirname(c.file.path)) || 'root').slice(0, 120),
       purpose: `${c.rule.label} stage detected from ${c.file.path}${c.models.length ? `. Models referenced: ${c.models.slice(0, 6).join(', ')}` : ''}.`,
       position,
-      inputs: isInstruction || kind === 'datastore' || kind === 'api_service' ? (kind === 'datastore' ? [{ ...inPort, label: 'Write' }] : []) : takesRules ? [RULES_PORT, inPort] : [inPort],
-      outputs: isInstruction ? [{ id: 'rules', label: 'Rules', type: 'rules' }] : [outPort],
-      config: isInstruction ? { implementation: { kind: 'demo', handler: 'instruction' }, params: { models: c.models.slice(0, 8) } } : { ...observed, params: { models: c.models.slice(0, 8) } },
+      inputs: isInstruction || kind === 'api_service' ? [] : kind === 'datastore' ? [{ ...IN_PORT, label: 'Write' }] : takesRules ? [RULES_PORT, IN_PORT] : [IN_PORT],
+      outputs: isInstruction ? [{ id: 'rules', label: 'Rules', type: 'rules' }] : [OUT_PORT],
+      config: isInstruction ? { implementation: { kind: 'demo', handler: 'instruction' }, params: { models: c.models.slice(0, 8) } } : { ...g.observed, params: { models: c.models.slice(0, 8) } },
       instructions: isInstruction ? promptText(c.file) : '',
       codeRefs: [{ id: 'src', path: c.file.path, note: 'Detected by repository import' }],
     });
-    nodes.push(n);
+    g.nodes.push(n);
     return n;
   };
 
-  // ---- main line ----
   const columns: WorkflowNode[][] = [];
-  const entryFiles = usable.filter((f) => ENTRY.test(stem(f.path))).sort((a, b) => a.path.split('/').length - b.path.split('/').length).slice(0, 3);
+  const entryFiles = usable.filter((f) => PIPELINE_ENTRY.test(stem(f.path))).sort((a, b) => a.path.split('/').length - b.path.split('/').length).slice(0, 3);
   const input = nodeSchema.parse({
-    id: idFor('input'), kind: 'input', label: 'Input', position: { x: 0, y: 0 },
+    id: g.idFor('input'), kind: 'input', label: 'Input', position: { x: 0, y: 0 },
     purpose: `Entry point of ${opts.projectName}${entryFiles.length ? ` (${entryFiles.map((f) => f.path).join(', ')})` : ''}.`,
     outputs: [{ id: 'request', label: 'Request', type: 'text' }],
-    config: observed,
+    config: g.observed,
     codeRefs: entryFiles.map((f, i) => ({ id: `entry${i + 1}`, path: f.path })),
   });
-  nodes.push(input);
+  g.nodes.push(input);
   columns.push([input]);
 
-  const stages = (Object.entries(STAGE) as [Role, number][]).sort((a, b) => a[1] - b[1]);
-  for (const [role] of stages) {
+  for (const [role] of (Object.entries(STAGE) as [Role, number][]).sort((a, b) => a[1] - b[1])) {
     const list = byRole.get(role);
     if (!list?.length) continue;
     const x = columns.length * COL;
-    const col = list.map((c, i) => make(c, { x, y: (i - (list.length - 1) / 2) * ROW }));
-    columns.push(col);
+    columns.push(list.map((c, i) => make(c, { x, y: (i - (list.length - 1) / 2) * ROW })));
   }
 
   const output = nodeSchema.parse({
-    id: idFor('output'), kind: 'output', label: 'Output', position: { x: columns.length * COL, y: 0 },
+    id: g.idFor('output'), kind: 'output', label: 'Output', position: { x: columns.length * COL, y: 0 },
     purpose: 'Final results returned to the user.',
     inputs: [{ id: 'in', label: 'In', type: 'any', multiple: true, merge: 'object_by_source' }],
-    config: observed,
+    config: g.observed,
   });
-  nodes.push(output);
+  g.nodes.push(output);
   columns.push([output]);
 
-  // Connect consecutive columns. Prefer real import relationships between the two stages.
+  // Connect consecutive columns, preferring real import relationships between the two stages.
   for (let k = 0; k + 1 < columns.length; k++) {
     const A = columns[k];
     const B = columns[k + 1];
@@ -263,10 +387,74 @@ export function analyzeRepository(files: SourceFile[], opts: { serviceId: string
       for (const a of A) if (!pairs.some(([x]) => x === a)) pairs.push([a, B[0]]);
       for (const b of B) if (!pairs.some(([, y]) => y === b)) pairs.push([A[0], b]);
     }
-    for (const [a, b] of pairs) edge(a.id, a.outputs[0].id, b.id, 'in');
+    for (const [a, b] of pairs) g.edge(a.id, a.outputs[0].id, b.id, 'in');
+  }
+  orderColumns(columns, g.edges);
+
+  const mainNodes = columns.flat();
+  const top = (col: WorkflowNode[]) => Math.min(...col.map((n) => n.position.y));
+  const bottom = (col: WorkflowNode[]) => Math.max(...col.map((n) => n.position.y));
+  const takesRules = (n: WorkflowNode) => n.inputs.some((x) => x.id === 'rules');
+
+  // Rules (parallelograms) above the node they most likely govern.
+  const aboveCount = new Map<number, number>();
+  for (const c of byRole.get('rules') ?? []) {
+    const f = c.file.path;
+    const target = mainNodes.find((n) => fileOf.has(n.id) && imports.get(fileOf.get(n.id)!)?.has(f) && takesRules(n))
+      ?? mainNodes.find((n) => takesRules(n) && (n.kind === 'router' || n.kind === 'planner'))
+      ?? mainNodes.find(takesRules);
+    const colIdx = target ? columns.findIndex((col) => col.includes(target)) : 1;
+    const stack = aboveCount.get(colIdx) ?? 0;
+    aboveCount.set(colIdx, stack + 1);
+    const n = make(c, { x: (target?.position.x ?? COL) + 10, y: (target ? top(columns[colIdx]) : 0) - 170 - stack * 110 });
+    if (target) g.edge(n.id, 'rules', target.id, 'rules');
   }
 
-  // Reduce crossings: order each column by the mean row of its predecessors (one barycenter sweep).
+  // Screeners (dashed side branches) off the node feeding judgement.
+  const judgeCol = columns.find((col) => col[0].kind === 'judge');
+  const anchorCol = judgeCol ? columns[columns.indexOf(judgeCol) - 1] : columns[Math.max(1, columns.length - 2)];
+  (byRole.get('screen') ?? []).forEach((c, i) => {
+    const anchor = anchorCol[0];
+    const y = i % 2 === 0 ? top(anchorCol) - 170 - Math.floor(i / 2) * 120 : bottom(anchorCol) + 170 + Math.floor(i / 2) * 120;
+    const n = make(c, { x: anchor.position.x + 20, y });
+    g.edge(anchor.id, anchor.outputs[0].id, n.id, 'in');
+  });
+
+  // Critic after the output.
+  for (const c of byRole.get('critic') ?? []) {
+    const feeder = columns[columns.length - 2][0];
+    const n = make(c, { x: output.position.x + 30, y: -200 });
+    g.edge(feeder.id, feeder.outputs[0].id, n.id, 'in');
+  }
+
+  // Judge ensemble container.
+  if (judgeCol && judgeCol.length >= 2) {
+    const minY = top(judgeCol) - 60;
+    const maxY = bottom(judgeCol) + 210;
+    g.nodes.unshift(nodeSchema.parse({
+      id: g.idFor('judges'), kind: 'group', label: 'Judges', position: { x: judgeCol[0].position.x - 25, y: minY },
+      display: { width: 280, height: Math.round(maxY - minY) },
+      purpose: 'Judge ensemble detected from multiple judge/review modules.',
+      config: { implementation: { kind: 'none' } },
+    }));
+  }
+
+  // Side row: data stores and model clients.
+  const sideY = Math.max(...g.nodes.map((n) => n.position.y)) + 260;
+  [...(byRole.get('store') ?? []), ...(byRole.get('client') ?? [])].forEach((c, i) => {
+    const users = mainNodes.filter((m) => {
+      const f = fileOf.get(m.id);
+      return f && imports.get(f)?.has(c.file.path) && m.inputs.some((x) => x.id === 'in');
+    });
+    const n = make(c, { x: COL + (i % 6) * COL, y: sideY + Math.floor(i / 6) * ROW });
+    if (users.length <= 3) for (const m of users) g.edge(n.id, 'out', m.id, 'in');
+    else n.purpose += ` Shared by ${users.length} stages: ${users.map((m) => m.label).join(', ')}.`;
+  });
+  return 0;
+}
+
+/** One barycenter sweep: order each column by the mean row of its predecessors, then re-space it. */
+function orderColumns(columns: WorkflowNode[][], edges: WorkflowEdge[]) {
   for (let k = 1; k < columns.length; k++) {
     const prevRow = new Map(columns[k - 1].map((n, i) => [n.id, i]));
     const bary = (n: WorkflowNode) => {
@@ -279,79 +467,287 @@ export function analyzeRepository(files: SourceFile[], opts: { serviceId: string
     keyed.forEach(({ n }, i) => { n.position = { x: n.position.x, y: (i - (col.length - 1) / 2) * ROW }; });
     columns[k] = keyed.map(({ n }) => n);
   }
+}
 
-  const mainNodes = columns.flat();
-  const top = (col: WorkflowNode[]) => Math.min(...col.map((n) => n.position.y));
-  const bottom = (col: WorkflowNode[]) => Math.max(...col.map((n) => n.position.y));
-  const nodeTarget = (preferred: (n: WorkflowNode) => boolean) => mainNodes.find((n) => n.inputs.some((p) => p.id === 'rules') && preferred(n)) ?? mainNodes.find((n) => n.inputs.some((p) => p.id === 'rules'));
+// ------------------------------------------------------------------ structure layout
 
-  // ---- rules (parallelograms) above the node they most likely govern ----
-  const rules = byRole.get('rules') ?? [];
-  const aboveCount = new Map<string, number>();
-  for (const c of rules) {
-    const f = c.file.path;
-    // Governs: a main node whose file imports it, else the first planner/router, else the first rule-taking node.
-    const target = mainNodes.find((n) => fileOf.has(n.id) && imports.get(fileOf.get(n.id)!)?.has(f) && n.inputs.some((p) => p.id === 'rules'))
-      ?? nodeTarget((n) => n.kind === 'router' || n.kind === 'planner');
-    const colIdx = target ? columns.findIndex((col) => col.includes(target)) : 1;
-    const key = String(colIdx);
-    const stack = aboveCount.get(key) ?? 0;
-    aboveCount.set(key, stack + 1);
-    const baseY = target ? top(columns[colIdx]) : 0;
-    const n = make(c, { x: (target?.position.x ?? COL) + 10, y: baseY - 170 - stack * 110 });
-    if (target) edge(n.id, 'rules', target.id, 'rules');
+interface Unit {
+  key: string;
+  files: SourceFile[];
+  label: string;
+  kind: NodeKind;
+  entry: boolean;
+  models: string[];
+  externals: Set<string>;
+  score: number;
+}
+
+const API_PATH = /(^|\/)(api|routes?|controllers?|handlers?|endpoints?)(\/|$)/;
+const ENTRY_STEM = /^(route|main|server|app|cli|__main__|manage|wsgi|asgi|handler|lambda|worker|bot)$/;
+const STORE_NAME = /^(db|database|supabase|prisma|repositor(y|ies)|repo|storage|cache|redis|queue|store|stores|persistence|dal|models?)$/;
+const UI_PATH = /(^|\/)(components?|app|pages|views?|ui|screens?|layouts?|widgets?)(\/|$)/;
+const MAX_UNITS = 26;
+const MAX_EXTERNALS = 8;
+
+/** Folders that only hold code and say nothing about it: "apps/server/src" is just "Server". */
+const STRUCTURAL = /^(src|lib|apps|packages|pkg|source|internal|cmd|code|modules)$/;
+
+function unitLabel(key: string, isFile: boolean): string {
+  const all = key.split('/').filter((s) => s && !/^\(.*\)$/.test(s)); // drop Next.js route groups like (dashboard)
+  const meaningful = all.filter((s, i) => !STRUCTURAL.test(s) || (isFile && i === all.length - 1));
+  const segs = meaningful.length ? meaningful : all;
+  if (!segs.length) return 'Root';
+  const pretty = (s: string) => (/^\[.*\]$/.test(s) ? `:${s.slice(1, -1)}` : titleCase(isFile ? s.replace(/\.[^.]+$/, '') : s));
+  const last = segs[segs.length - 1];
+  if (isFile) return pretty(last);
+  if (segs.includes('api') && last !== 'api') return `${pretty(segs.slice(segs.indexOf('api') + 1).join(' '))} API`;
+  if (segs.length >= 2) return `${pretty(last)} (${segs[segs.length - 2]})`;
+  return pretty(last);
+}
+
+function analyzeStructure(p: Prepared, g: GraphBuilder, opts: { projectName: string }): number {
+  const sources = p.usable.filter((f) => SOURCE_EXT.has(path.posix.extname(f.path).toLowerCase()));
+  const prompts = p.usable.filter((f) => PROMPT_EXT.has(path.posix.extname(f.path).toLowerCase()) && classify(f)?.role === 'rules').slice(0, 3);
+  if (!sources.length) return 0;
+
+  // 1. Units: one per folder; a folder holding a large share of the project is split into its files.
+  const dirOf = (f: SourceFile) => path.posix.dirname(f.path);
+  const perDir = new Map<string, number>();
+  for (const f of sources) perDir.set(dirOf(f), (perDir.get(dirOf(f)) ?? 0) + 1);
+  const splitDir = (d: string) => d === '.' || ((perDir.get(d) ?? 0) > 8 && (perDir.get(d) ?? 0) > sources.length * 0.3);
+  const unitKeyOf = new Map<string, string>();
+  const units = new Map<string, Unit>();
+  for (const f of sources) {
+    const d = dirOf(f);
+    const isFile = splitDir(d);
+    const key = isFile ? f.path : d;
+    unitKeyOf.set(f.path, key);
+    let u = units.get(key);
+    if (!u) {
+      u = { key, files: [], label: unitLabel(key, isFile), kind: 'module', entry: false, models: [], externals: new Set(), score: 0 };
+      units.set(key, u);
+    }
+    u.files.push(f);
   }
 
-  // ---- screeners (dashed side branches) off the node feeding judgement ----
-  const screens = byRole.get('screen') ?? [];
-  const judgeCol = columns.find((col) => col[0].kind === 'judge');
-  const anchorCol = judgeCol ? columns[columns.indexOf(judgeCol) - 1] : columns[Math.max(1, columns.length - 2)];
-  screens.forEach((c, i) => {
-    const anchor = anchorCol[0];
-    const above = i % 2 === 0;
-    const y = above ? top(anchorCol) - 170 - Math.floor(i / 2) * 120 : bottom(anchorCol) + 170 + Math.floor(i / 2) * 120;
-    const n = make(c, { x: anchor.position.x + 20, y });
-    edge(anchor.id, anchor.outputs[0].id, n.id, 'in');
+  // 2. Unit → unit and unit → external usage.
+  const uses = new Map<string, Set<string>>();
+  const extUse = new Map<string, Set<string>>(); // external label → unit keys
+  const extMeta = new Map<string, { kind: NodeKind; llm: boolean }>();
+  for (const f of sources) {
+    const from = unitKeyOf.get(f.path)!;
+    for (const dep of p.imports.get(f.path) ?? []) {
+      const to = unitKeyOf.get(dep);
+      if (to && to !== from) (uses.get(from) ?? uses.set(from, new Set()).get(from)!).add(to);
+    }
+    const exts = new Set<string>();
+    for (const pkg of p.packages.get(f.path) ?? []) {
+      const e = externalFor(pkg);
+      if (e) { exts.add(e.label); extMeta.set(e.label, { kind: e.kind, llm: !!e.llm }); }
+    }
+    for (const m of f.content.matchAll(HOST_RE)) {
+      const host = m[1];
+      const known = /supabase\.co$/.test(host) ? 'Supabase' : /openrouter\.ai$/.test(host) ? 'OpenRouter' : /generativelanguage/.test(host) ? 'Google Gemini' : /api\.openai\.com/.test(host) ? 'OpenAI' : /api\.anthropic\.com/.test(host) ? 'Anthropic' : /api\.github\.com/.test(host) ? 'GitHub' : host;
+      exts.add(known);
+      if (!extMeta.has(known)) extMeta.set(known, { kind: known === 'Supabase' ? 'datastore' : 'api_service', llm: ['OpenRouter', 'Google Gemini', 'OpenAI', 'Anthropic'].includes(known) });
+    }
+    for (const e of exts) {
+      units.get(from)!.externals.add(e);
+      (extUse.get(e) ?? extUse.set(e, new Set()).get(e)!).add(from);
+    }
+  }
+
+  // 3. What each unit is, from its own path and code only.
+  const importedBy = new Map<string, number>();
+  for (const set of uses.values()) for (const k of set) importedBy.set(k, (importedBy.get(k) ?? 0) + 1);
+  for (const u of units.values()) {
+    const isFileUnit = u.files.length === 1 && u.key === u.files[0].path;
+    const name = isFileUnit ? stem(u.key) : path.posix.basename(u.key).toLowerCase();
+    u.models = [...new Set(u.files.flatMap((f) => p.models.get(f.path) ?? []))];
+    const usesLlm = u.models.length > 0 || [...u.externals].some((e) => extMeta.get(e)?.llm);
+    const uiShare = u.files.filter((f) => UI_EXT.test(f.path)).length / u.files.length;
+    const isApi = API_PATH.test(u.key) || u.files.some((f) => stem(f.path) === 'route');
+    const isPage = u.files.some((f) => /^(page|index)$/.test(stem(f.path)) && UI_EXT.test(f.path) && /(^|\/)(app|pages)(\/|$)/.test(f.path));
+    const role = isFileUnit ? RULES.find((r) => ['planner', 'judge', 'critic', 'screen', 'router'].includes(r.role) && r.re.test(name)) : undefined;
+    if (/^prompts?$/.test(name)) u.kind = 'instruction';
+    else if (STORE_NAME.test(name) && !isPage) u.kind = 'datastore';
+    else if (isApi) u.kind = usesLlm ? 'model' : 'module';
+    else if (uiShare > 0.5 && (UI_PATH.test(u.key) || isPage)) u.kind = 'ui';
+    else if (role && usesLlm) u.kind = role.kind;
+    else if (usesLlm) u.kind = 'model';
+    else u.kind = 'module';
+    u.entry = isApi || isPage || (!importedBy.get(u.key) && u.files.some((f) => ENTRY_STEM.test(stem(f.path)) || stem(f.path) === 'index'));
+    if (isApi && !/api$/i.test(u.label) && u.kind !== 'instruction') u.label = `${u.label} API`;
+    u.score = (u.entry ? 4 : 0) + (usesLlm ? 4 : 0) + Math.log2(1 + u.files.length) + Math.min(importedBy.get(u.key) ?? 0, 5) + Math.min(uses.get(u.key)?.size ?? 0, 3) + u.externals.size;
+  }
+
+  // 4. Keep the most important units; bridge edges through the ones left out.
+  const ranked = [...units.values()].sort((a, b) => b.score - a.score || a.key.localeCompare(b.key));
+  const kept = new Set(ranked.slice(0, MAX_UNITS).map((u) => u.key));
+  const hidden = units.size - kept.size;
+  const keptUses = new Map<string, Set<string>>();
+  for (const k of kept) {
+    const out = new Set<string>();
+    const seen = new Set<string>([k]);
+    const stack = [...(uses.get(k) ?? [])];
+    while (stack.length) {
+      const x = stack.pop()!;
+      if (seen.has(x)) continue;
+      seen.add(x);
+      if (kept.has(x)) out.add(x);
+      else stack.push(...(uses.get(x) ?? []));
+    }
+    keptUses.set(k, out);
+  }
+  // Externals reached only through hidden units still belong to the kept unit that leads there.
+  const externals = [...extUse.entries()].sort((a, b) => b[1].size - a[1].size).slice(0, MAX_EXTERNALS).map(([e]) => e);
+
+  // 5. Break import cycles (keep edges in DFS tree/forward order from entry points).
+  const order = [...kept].sort((a, b) => Number(units.get(b)!.entry) - Number(units.get(a)!.entry) || units.get(b)!.score - units.get(a)!.score);
+  const state = new Map<string, 0 | 1 | 2>();
+  const dag = new Map<string, Set<string>>([...kept].map((k) => [k, new Set<string>()]));
+  const visit = (k: string) => {
+    state.set(k, 1);
+    for (const t of keptUses.get(k) ?? []) {
+      const s = state.get(t) ?? 0;
+      if (s === 1) continue; // back edge → would close a cycle
+      dag.get(k)!.add(t);
+      if (s === 0) visit(t);
+    }
+    state.set(k, 2);
+  };
+  for (const k of order) if (!state.get(k)) visit(k);
+
+  // 6. Layers: entry points first, then longest path along "uses".
+  const layer = new Map<string, number>();
+  const indeg = new Map<string, number>([...kept].map((k) => [k, 0]));
+  for (const ts of dag.values()) for (const t of ts) indeg.set(t, (indeg.get(t) ?? 0) + 1);
+  const queue = [...kept].filter((k) => indeg.get(k) === 0);
+  for (const k of queue) layer.set(k, 1);
+  while (queue.length) {
+    const k = queue.shift()!;
+    for (const t of dag.get(k)!) {
+      layer.set(t, Math.max(layer.get(t) ?? 1, (layer.get(k) ?? 1) + 1));
+      indeg.set(t, indeg.get(t)! - 1);
+      if (indeg.get(t) === 0) queue.push(t);
+    }
+  }
+  const maxLayer = Math.max(1, ...layer.values());
+
+  // 7. Nodes.
+  const nodeOf = new Map<string, WorkflowNode>();
+  const columns: WorkflowNode[][] = [];
+  const entries = [...kept].filter((k) => units.get(k)!.entry);
+  const input = nodeSchema.parse({
+    id: g.idFor('input'), kind: 'input', label: 'Requests', position: { x: 0, y: 0 },
+    purpose: `Where work enters ${opts.projectName}${entries.length ? `: ${entries.map((k) => units.get(k)!.label).join(', ')}` : ''}.`,
+    outputs: [{ id: 'request', label: 'Request', type: 'text' }],
+    config: g.observed,
+  });
+  g.nodes.push(input);
+  columns.push([input]);
+  for (let l = 1; l <= maxLayer; l++) {
+    const col: WorkflowNode[] = [];
+    for (const k of order.filter((x) => layer.get(x) === l)) {
+      const u = units.get(k)!;
+      const isInstruction = u.kind === 'instruction';
+      const n = nodeSchema.parse({
+        id: g.idFor(u.label.toLowerCase()),
+        kind: u.kind,
+        label: g.uniqueLabel(u.label, u.key).slice(0, 120),
+        purpose: `${u.files.length === 1 ? u.files[0].path : `${u.key}/ (${u.files.length} files)`}${u.externals.size ? `. Uses: ${[...u.externals].join(', ')}` : ''}${u.models.length ? `. Models: ${u.models.slice(0, 6).join(', ')}` : ''}.`,
+        position: { x: l * COL, y: 0 },
+        inputs: isInstruction ? [] : u.kind === 'model' ? [RULES_PORT, IN_PORT] : [IN_PORT],
+        outputs: isInstruction ? [{ id: 'rules', label: 'Rules', type: 'rules' }] : [OUT_PORT],
+        config: isInstruction ? { implementation: { kind: 'demo', handler: 'instruction' } } : { ...g.observed, params: { models: u.models.slice(0, 8) } },
+        instructions: isInstruction ? promptText(u.files[0]) : '',
+        codeRefs: u.files.slice(0, 8).map((f, i) => ({ id: `src${i + 1}`, path: f.path })),
+      });
+      nodeOf.set(k, n);
+      g.nodes.push(n);
+      col.push(n);
+    }
+    columns.push(col);
+  }
+  for (const k of entries) g.edge(input.id, 'request', nodeOf.get(k)!.id, 'in');
+  if (!entries.length) for (const k of [...kept].filter((x) => layer.get(x) === 1)) g.edge(input.id, 'request', nodeOf.get(k)!.id, 'in');
+  for (const [k, ts] of dag) for (const t of ts) {
+    const a = nodeOf.get(k)!;
+    const b = nodeOf.get(t)!;
+    if (b.kind === 'instruction') g.edge(b.id, 'rules', a.id, a.inputs.some((x) => x.id === 'rules') ? 'rules' : 'in');
+    else if (a.kind !== 'instruction') g.edge(a.id, 'out', b.id, 'in');
+  }
+
+  // External services in the last column, fed by the units that use them.
+  const extCol: WorkflowNode[] = [];
+  for (const e of externals) {
+    const meta = extMeta.get(e)!;
+    const n = nodeSchema.parse({
+      id: g.idFor(e.toLowerCase()),
+      kind: meta.kind,
+      label: g.uniqueLabel(e, 'external'),
+      purpose: `External ${meta.kind === 'datastore' ? 'data store' : meta.llm ? 'model provider' : 'service'} used by ${[...(extUse.get(e) ?? [])].map((k) => units.get(k)?.label ?? k).slice(0, 6).join(', ')}.`,
+      position: { x: (maxLayer + 1) * COL, y: 0 },
+      inputs: [{ ...IN_PORT, label: meta.kind === 'datastore' ? 'Read / write' : 'Calls' }],
+      outputs: [OUT_PORT],
+      config: g.observed,
+    });
+    g.nodes.push(n);
+    extCol.push(n);
+    for (const k of extUse.get(e) ?? []) {
+      // A hidden unit's calls are drawn from the kept unit that leads to it.
+      const from = kept.has(k) ? [k] : [...kept].filter((x) => [...(uses.get(x) ?? [])].includes(k));
+      for (const f of from) g.edge(nodeOf.get(f)!.id, 'out', n.id, 'in');
+    }
+  }
+  if (extCol.length) columns.push(extCol);
+
+  // Prompt documents (rules) attached to the first unit that talks to a model.
+  const llmNode = g.nodes.find((n) => n.inputs.some((x) => x.id === 'rules'));
+  prompts.forEach((f, i) => {
+    const n = nodeSchema.parse({
+      id: g.idFor(stem(f.path)), kind: 'instruction', label: g.uniqueLabel(titleCase(stem(f.path)), 'prompt'),
+      purpose: `Prompt / rules document ${f.path}.`, position: { x: (llmNode?.position.x ?? COL) + 10, y: -400 - i * 110 },
+      outputs: [{ id: 'rules', label: 'Rules', type: 'rules' }],
+      config: { implementation: { kind: 'demo', handler: 'instruction' } },
+      instructions: promptText(f),
+      codeRefs: [{ id: 'src', path: f.path }],
+    });
+    g.nodes.push(n);
+    if (llmNode) g.edge(n.id, 'rules', llmNode.id, 'rules');
   });
 
-  // ---- critic after the output ----
-  for (const c of byRole.get('critic') ?? []) {
-    const feeder = columns[columns.length - 2][0];
-    const n = make(c, { x: output.position.x + 30, y: -200 });
-    edge(feeder.id, feeder.outputs[0].id, n.id, 'in');
+  for (const col of columns) col.forEach((n, i) => { n.position = { x: n.position.x, y: (i - (col.length - 1) / 2) * ROW }; });
+  orderColumns(columns, g.edges);
+  // Prompts sit just above the column of the node they feed.
+  if (llmNode) {
+    const col = columns.find((c) => c.includes(llmNode))!;
+    const top = Math.min(...col.map((n) => n.position.y));
+    g.nodes.filter((n) => n.kind === 'instruction' && !col.includes(n)).forEach((n, i) => { n.position = { x: llmNode.position.x + 10, y: top - 170 - i * 110 }; });
   }
+  return hidden;
+}
 
-  // ---- judge ensemble container ----
-  if (judgeCol && judgeCol.length >= 2) {
-    const minY = top(judgeCol) - 60;
-    const maxY = bottom(judgeCol) + 210;
-    const g = nodeSchema.parse({
-      id: idFor('judges'), kind: 'group', label: 'Judges', position: { x: judgeCol[0].position.x - 25, y: minY },
-      display: { width: 280, height: Math.round(maxY - minY) },
-      purpose: 'Judge ensemble detected from multiple judge/review modules.',
-      config: { implementation: { kind: 'none' } },
-    });
-    nodes.unshift(g); // render behind its members
-  }
+// ------------------------------------------------------------------ entry point
 
-  // ---- side row: data stores and model clients ----
-  const side = [...(byRole.get('store') ?? []), ...(byRole.get('client') ?? [])];
-  const sideY = Math.max(...nodes.map((n) => n.position.y)) + 260;
-  side.forEach((c, i) => {
-    const users = mainNodes.filter((m) => {
-      const f = fileOf.get(m.id);
-      return f && imports.get(f)?.has(c.file.path) && m.inputs.some((p) => p.id === 'in');
-    });
-    const n = make(c, { x: COL + (i % 6) * COL, y: sideY + Math.floor(i / 6) * ROW });
-    // Wire it to the nodes that import it, unless it is shared infrastructure used almost everywhere.
-    if (users.length <= 3) for (const m of users) edge(n.id, 'out', m.id, 'in');
-    else n.purpose += ` Shared by ${users.length} stages: ${users.map((m) => m.label).join(', ')}.`;
-  });
-
-  const languages = [...new Set(usable.map((f) => path.posix.extname(f.path).slice(1).toLowerCase()).filter((e) => SOURCE_EXT.has(`.${e}`)))];
+export function analyzeRepository(files: SourceFile[], opts: { serviceId: string; projectName: string; mode?: AnalysisMode }): AnalysisResult {
+  const p = prepare(files);
+  const g = new GraphBuilder(opts.serviceId);
+  const evidence = pipelineEvidence(p);
+  const mode = opts.mode === 'pipeline' || (opts.mode !== 'structure' && evidence.yes) ? 'pipeline' : 'structure';
+  const reason = opts.mode === 'pipeline' ? 'AI pipeline layout chosen at import' : opts.mode === 'structure' ? 'code structure layout chosen at import' : evidence.reason;
+  const hiddenModules = mode === 'pipeline' ? analyzePipeline(p, g, opts) : analyzeStructure(p, g, opts);
   return {
-    nodes,
-    edges,
-    stats: { filesScanned: usable.length, filesMatched: nodes.filter((n) => n.codeRefs.length).length, models: [...allModels].slice(0, 60), languages },
+    nodes: g.nodes,
+    edges: g.edges,
+    stats: {
+      filesScanned: p.usable.length,
+      filesMatched: g.nodes.filter((n) => n.codeRefs.length).length,
+      models: [...p.allModels].slice(0, 60),
+      languages: p.languages,
+      mode,
+      reason,
+      hiddenModules,
+    },
   };
 }

@@ -8,9 +8,10 @@ import { Inspector } from './inspector/Inspector';
 import { Timeline } from './components/Timeline';
 import { Connections } from './components/Connections';
 import { AskClaude, TaskDetail } from './components/AskClaude';
-import { ConflictBanner, HelpDialog, NewWorkflow, PairingScreen, Toasts, ValidateDialog } from './components/Dialogs';
+import { ConflictBanner, DeleteWorkflowDialog, HelpDialog, NewWorkflow, PairingScreen, Toasts, ValidateDialog } from './components/Dialogs';
 import { FloatingPanel } from './components/FloatingPanel';
 import { RightDock } from './components/RightDock';
+import { SimReviewDialog, SimulationOverlay } from './components/Simulation';
 import { ImportProject } from './components/ImportProject';
 import { NodeSearch } from './components/NodeSearch';
 import { draftState } from './inspector/draft';
@@ -39,13 +40,15 @@ function Workspace() {
   const wf = useStore((s) => s.wf);
   const panels = useStore((s) => s.panels);
   const togglePanel = useStore((s) => s.togglePanel);
+  const simulating = useStore((s) => !!s.sim);
   useShortcuts();
   return (
-    <div className="app">
+    <div className={`app${simulating ? ' simulating' : ''}`}>
       <Toolbar />
       <ConflictBanner />
       <div className="stage">
-        <main className="stage-canvas" aria-label="Workflow canvas">
+        <main className="stage-canvas" aria-label={simulating ? 'Simulation canvas' : 'Workflow canvas'}>
+          <SimulationOverlay />
           <Canvas />
           {panels.inspector && wf && (
             <FloatingPanel id="inspector" title="Inspector" icon="☰" width={400} height={640} initial={() => ({ x: 72, y: 60 })} onClose={() => togglePanel('inspector', false)}>
@@ -67,6 +70,8 @@ function Workspace() {
       {dialog === 'validate' && <ValidateDialog />}
       {dialog === 'help' && <HelpDialog />}
       {dialog === 'import' && <ImportProject />}
+      {dialog === 'deleteWorkflow' && <DeleteWorkflowDialog />}
+      {dialog === 'simReview' && <SimReviewDialog />}
       {openTaskId && <TaskDetail />}
       <Toasts />
     </div>

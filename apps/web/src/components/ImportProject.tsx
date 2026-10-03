@@ -10,7 +10,14 @@ const TEXT_EXT = /\.(ts|tsx|js|mjs|cjs|jsx|py|go|rs|java|kt|rb|php|cs|swift|md|t
 const SOURCE_EXT = /\.(ts|tsx|js|mjs|cjs|jsx|py|go|rs|java|kt|rb|php|cs|swift)$/i;
 const PROMPTISH = /prompt|rules?|polic|instruction|system|persona|template/i;
 
-interface Stats { filesScanned: number; filesMatched: number; models: string[]; languages: string[] }
+interface Stats { filesScanned: number; filesMatched: number; models: string[]; languages: string[]; mode: 'structure' | 'pipeline'; reason: string; hiddenModules: number }
+type Mode = 'auto' | 'structure' | 'pipeline';
+
+const MODES: [Mode, string, string][] = [
+  ['auto', 'Auto', 'Code structure, unless the code clearly is an AI pipeline (planner, judge… files that call models).'],
+  ['structure', 'Code structure', 'Entry points (API routes, pages, main) → the modules they use → databases and external APIs. Works for any project.'],
+  ['pipeline', 'AI pipeline', 'Stages left to right: rules → router → planner → discover → inspect → judge → rank. Only for AI pipelines.'],
+];
 interface ImportResponse { workflow: { id: string; name: string; nodes: unknown[] }; stats: Stats }
 
 /** Import a project from a git link or an uploaded folder; the server reads it and builds the initial node graph. */
@@ -18,6 +25,7 @@ export function ImportProject() {
   const s = useStore();
   const [tab, setTab] = useState<'git' | 'folder'>('git');
   const [url, setUrl] = useState('');
+  const [mode, setMode] = useState<Mode>('auto');
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [picked, setPicked] = useState<{ name: string; files: File[]; skipped: number } | null>(null);
@@ -27,14 +35,14 @@ export function ImportProject() {
     await s.loadWorkflows();
     await s.loadWorkflow(r.workflow.id);
     s.set({ dialog: null });
-    s.toast('success', `Imported “${r.workflow.name}”: ${r.workflow.nodes.length} nodes from ${r.stats.filesScanned} files${r.stats.models.length ? `, ${r.stats.models.length} model ids found` : ''}.`);
+    s.toast('success', `Imported “${r.workflow.name}” as a demo copy, shown as ${r.stats.mode === 'pipeline' ? 'an AI pipeline' : 'its code structure'} (${r.stats.reason}). ${r.workflow.nodes.length} nodes from ${r.stats.filesScanned} files. The original is unchanged.`);
   };
 
   const importGit = async () => {
     setError(null);
     setBusy('Cloning and reading the repository…');
     try {
-      await done(await api.post<ImportResponse>('/api/import/git', { url: url.trim() }));
+      await done(await api.post<ImportResponse>('/api/import/git', { url: url.trim(), mode }));
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -50,7 +58,8 @@ export function ImportProject() {
     const rank = (f: File) => (SOURCE_EXT.test(f.name) ? 0 : PROMPTISH.test(f.webkitRelativePath || f.name) ? 1 : 2);
     const files = all.filter((f) => {
       const parts = (f.webkitRelativePath || f.name).split('/');
-      return !parts.slice(0, -1).some((p) => SKIP_DIRS.has(p)) && TEXT_EXT.test(f.name) && f.size <= MAX_FILE_BYTES;
+      // Dependencies, build output, virtualenvs ("…venv…"), site-packages and hidden folders hold no project code.
+      return !parts.slice(0, -1).some((p) => SKIP_DIRS.has(p) || /venv/i.test(p) || p === 'site-packages' || p.startsWith('.')) && TEXT_EXT.test(f.name) && f.size <= MAX_FILE_BYTES;
     }).sort((a, b) => rank(a) - rank(b)).slice(0, MAX_FILES);
     setPicked({ name, files, skipped: all.length - files.length });
     setError(null);
@@ -67,7 +76,7 @@ export function ImportProject() {
         out.push({ path: f.webkitRelativePath || f.name, content: await f.text() });
       }
       setBusy('Analysing the project…');
-      await done(await api.post<ImportResponse>('/api/import/files', { name: picked.name, files: out }));
+      await done(await api.post<ImportResponse>('/api/import/files', { name: picked.name, files: out, mode }));
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -78,13 +87,27 @@ export function ImportProject() {
   return (
     <Modal title="Import project" onClose={() => !busy && s.set({ dialog: null })}>
       <p className="muted small" style={{ margin: 0 }}>
-        The project’s source files are read locally and grouped into pipeline stages: rules, routing, planning, discovery, screening, inspection, judging and ranking.
-        Model ids found in the code are shown on the nodes. The result is a starting point to edit, not a guarantee.
+        The project’s source files are read and turned into boxes for its real modules, with arrows for which code uses which, and its databases and external APIs at the end.
+        Model ids found in the code are shown on the boxes. The result is a starting point to edit, not a guarantee.
       </p>
+      <div className="banner info" role="note">
+        <span aria-hidden="true">🔒</span>
+        <span><b>Your original project is never changed.</b> It is only read. A private demo copy is kept in NodePilot’s own data folder, cut off from the original repository (no remote, so nothing can be pushed), and used just to draw this graph.</span>
+      </div>
       <div className="seg" role="tablist" aria-label="Import source">
         <button role="tab" aria-selected={tab === 'git'} className={`seg-btn${tab === 'git' ? ' on' : ''}`} onClick={() => setTab('git')}>Git link</button>
         <button role="tab" aria-selected={tab === 'folder'} className={`seg-btn${tab === 'folder' ? ' on' : ''}`} onClick={() => setTab('folder')}>Upload folder</button>
       </div>
+
+      <fieldset className="fs import-mode">
+        <legend>Structure</legend>
+        <div className="seg" role="radiogroup" aria-label="How to lay out the project">
+          {MODES.map(([m, label]) => (
+            <button key={m} role="radio" aria-checked={mode === m} className={`seg-btn${mode === m ? ' on' : ''}`} onClick={() => setMode(m)} disabled={!!busy}>{label}</button>
+          ))}
+        </div>
+        <span className="field-help">{MODES.find(([m]) => m === mode)![2]}</span>
+      </fieldset>
 
       {tab === 'git' && (
         <div className="form">
@@ -98,7 +121,7 @@ export function ImportProject() {
               onKeyDown={(e) => e.key === 'Enter' && url.trim() && !busy && void importGit()}
               disabled={!!busy}
             />
-            <span className="field-help">Public https repositories. A shallow clone is kept in the local data folder so code references open in your editor.</span>
+            <span className="field-help">Public https repositories. A shallow demo copy is kept in NodePilot’s data folder; the original repository is not touched.</span>
           </label>
           <div className="row"><span className="grow" /><button className="btn primary" disabled={!url.trim() || !!busy} onClick={() => void importGit()}>Import</button></div>
         </div>

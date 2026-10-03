@@ -5,6 +5,8 @@ export interface NodeTemplate {
   kind: NodeKind;
   label: string;
   description: string;
+  /** Section in the add-node search: generic building blocks first, AI-pipeline presets after. */
+  group: 'General' | 'AI pipeline' | 'Layout';
   build: (id: string, position: { x: number; y: number }) => WorkflowNode;
 }
 
@@ -20,68 +22,68 @@ const demo = (handler: string) => ({ implementation: { kind: 'demo' as const, ha
 /** Palette entries. Demo templates run deterministic local handlers; others start "Not configured". */
 export const NODE_TEMPLATES: NodeTemplate[] = [
   {
-    key: 'user_query', kind: 'input', label: 'User query', description: 'Workflow entry point emitting the query text (demo).',
+    key: 'user_query', kind: 'input', group: 'General', label: 'Input', description: 'Where work enters: a request, query, upload or trigger (circle).',
     build: (id, position) => node({ id, kind: 'input', label: 'User query', position, outputs: [{ id: 'query', label: 'Query', type: 'text' }], config: { ...demo('user_query'), params: { query: 'Find the most suspenseful scene' } } }),
   },
   {
-    key: 'planner', kind: 'planner', label: 'Planner', description: 'Turns a query into a plan (demo).',
+    key: 'planner', kind: 'planner', group: 'AI pipeline', label: 'Planner', description: 'Turns a query into a plan (demo).',
     build: (id, position) => node({ id, kind: 'planner', label: 'Planner', position, inputs: [RULES_PORT, { id: 'query', label: 'Query', type: 'text' }], outputs: [{ id: 'plan', label: 'Plan', type: 'plan' }], config: { ...demo('planner'), params: { strategy: 'breadth' } } }),
   },
   {
-    key: 'plan_combiner', kind: 'combiner', label: 'Plan combiner', description: 'Merges several plans (explicit array merge).',
+    key: 'plan_combiner', kind: 'combiner', group: 'AI pipeline', label: 'Plan combiner', description: 'Merges several plans (explicit array merge).',
     build: (id, position) => node({ id, kind: 'combiner', label: 'Plan combiner', position, inputs: [{ id: 'plans', label: 'Plans', type: 'plan', multiple: true, merge: 'array' }], outputs: [{ id: 'plan', label: 'Plan', type: 'plan' }], config: demo('plan_combiner') }),
   },
   {
-    key: 'scanner', kind: 'scanner', label: 'Scanner', description: 'Scans the corpus following a plan (demo).',
+    key: 'scanner', kind: 'scanner', group: 'AI pipeline', label: 'Scanner', description: 'Scans the corpus following a plan (demo).',
     build: (id, position) => node({ id, kind: 'scanner', label: 'Scanner', position, inputs: [{ id: 'plan', label: 'Plan', type: 'plan' }], outputs: [{ id: 'scan', label: 'Scan', type: 'scan' }], config: demo('scanner') }),
   },
   {
-    key: 'scene_worker', kind: 'worker', label: 'Scene worker', description: 'Builds a scene from scan results (demo).',
+    key: 'scene_worker', kind: 'worker', group: 'AI pipeline', label: 'Scene worker', description: 'Builds a scene from scan results (demo).',
     build: (id, position) => node({ id, kind: 'worker', label: 'Scene worker', position, inputs: [RULES_PORT, { id: 'scan', label: 'Scan', type: 'scan' }], outputs: [{ id: 'scene', label: 'Scene', type: 'scene' }], config: demo('scene_worker') }),
   },
   {
-    key: 'judge', kind: 'judge', label: 'Judge', description: 'Scores a scene against one criterion (demo).',
+    key: 'judge', kind: 'judge', group: 'AI pipeline', label: 'Judge', description: 'Scores a scene against one criterion (demo).',
     build: (id, position) => node({ id, kind: 'judge', label: 'Judge', position, inputs: [RULES_PORT, { id: 'scene', label: 'Scene', type: 'scene' }], outputs: [{ id: 'score', label: 'Score', type: 'score' }], config: { ...demo('judge'), params: { criterion: 'coherence' }, retry: { maxAttempts: 2, backoffMs: 200, safeToRetry: true } } }),
   },
   {
-    key: 'score_combiner', kind: 'aggregator', label: 'Score combiner', description: 'Aggregates judge scores (explicit keyed merge).',
+    key: 'score_combiner', kind: 'aggregator', group: 'AI pipeline', label: 'Score combiner', description: 'Aggregates judge scores (explicit keyed merge).',
     build: (id, position) => node({ id, kind: 'aggregator', label: 'Score combiner', position, inputs: [{ id: 'scores', label: 'Scores', type: 'score', multiple: true, merge: 'object_by_source' }], outputs: [{ id: 'report', label: 'Report', type: 'report' }], config: demo('score_combiner') }),
   },
   {
-    key: 'results', kind: 'output', label: 'Results', description: 'Terminal output node.',
+    key: 'results', kind: 'output', group: 'General', label: 'Output', description: 'What comes out at the end (circle).',
     build: (id, position) => node({ id, kind: 'output', label: 'Results', position, inputs: [{ id: 'report', label: 'Report', type: 'any' }], config: demo('results') }),
   },
   {
-    key: 'model', kind: 'model', label: 'Model call', description: 'Real model call via an adapter. Needs a credential reference.',
+    key: 'model', kind: 'model', group: 'General', label: 'Model call', description: 'Real model call via an adapter. Needs a credential reference.',
     build: (id, position) => node({ id, kind: 'model', label: 'Model call', position, inputs: [RULES_PORT, { id: 'prompt', label: 'Prompt', type: 'any' }], outputs: [{ id: 'text', label: 'Text', type: 'text' }], config: { implementation: { kind: 'model', provider: 'anthropic', model: 'claude-haiku-4-5', maxTokens: 512 }, timeoutMs: 60_000 } }),
   },
   {
-    key: 'api_service', kind: 'api_service', label: 'Observed API service', description: 'A node implemented by an external backend; observed, never executed here.',
+    key: 'api_service', kind: 'api_service', group: 'General', label: 'External service', description: 'A third-party API or backend; observed, never executed here.',
     build: (id, position) => node({ id, kind: 'api_service', label: 'API service', position, inputs: [{ id: 'in', label: 'In', type: 'any', required: false }], outputs: [{ id: 'out', label: 'Out', type: 'json' }], config: { implementation: { kind: 'observed', serviceId: 'example-backend' } } }),
   },
   {
-    key: 'instruction', kind: 'instruction', label: 'Instructions / rules', description: 'Prompt template, policy or rules. Attach to the top of the node it governs.',
+    key: 'instruction', kind: 'instruction', group: 'General', label: 'Instructions / rules', description: 'Prompt template, policy or rules. Attach to the top of the node it governs.',
     build: (id, position) => node({ id, kind: 'instruction', label: 'Rules', position, outputs: [{ id: 'rules', label: 'Rules', type: 'rules' }], instructions: 'Describe the rules or prompt this node applies.', config: demo('instruction') }),
   },
   {
-    key: 'auxiliary', kind: 'auxiliary', label: 'Side check', description: 'Optional side branch: screener, pre-judge or alternate variant (dashed).',
+    key: 'auxiliary', kind: 'auxiliary', group: 'General', label: 'Side check', description: 'Optional side branch: screener, pre-judge or alternate variant (dashed).',
     build: (id, position) => node({ id, kind: 'auxiliary', label: 'Side check', position, inputs: [{ id: 'in', label: 'In', type: 'any' }], outputs: [{ id: 'out', label: 'Out', type: 'json' }], config: demo('echo') }),
   },
   {
-    key: 'router', kind: 'router', label: 'Router', description: 'Conditional branch or dispatcher (diamond).',
+    key: 'router', kind: 'router', group: 'General', label: 'Router', description: 'Conditional branch or dispatcher (diamond).',
     build: (id, position) => node({ id, kind: 'router', label: 'Router', position, inputs: [{ id: 'in', label: 'In', type: 'any' }], outputs: [{ id: 'a', label: 'A', type: 'json' }, { id: 'b', label: 'B', type: 'json' }], config: demo('echo') }),
   },
   {
-    key: 'datastore', kind: 'datastore', label: 'Data store', description: 'Database, cache, vector index or queue (cylinder).',
+    key: 'datastore', kind: 'datastore', group: 'General', label: 'Data store', description: 'Database, cache, vector index or queue (cylinder).',
     build: (id, position) => node({ id, kind: 'datastore', label: 'Data store', position, inputs: [{ id: 'in', label: 'Write', type: 'any', required: false }], outputs: [{ id: 'out', label: 'Read', type: 'json' }], config: demo('echo') }),
   },
   {
-    key: 'group', kind: 'group', label: 'Group / ensemble', description: 'Container for related nodes, e.g. a judge council. Layout only, never executed.',
+    key: 'group', kind: 'group', group: 'Layout', label: 'Group / ensemble', description: 'Container for related nodes, e.g. a judge council. Layout only, never executed.',
     build: (id, position) => node({ id, kind: 'group', label: 'Group', position, display: { width: 300, height: 360 }, config: { implementation: { kind: 'none' } } }),
   },
   {
-    key: 'empty', kind: 'worker', label: 'Empty worker', description: 'Blank node with no implementation (shows "Not configured").',
-    build: (id, position) => node({ id, kind: 'worker', label: 'New worker', position, inputs: [RULES_PORT, { id: 'in', label: 'In', type: 'any' }], outputs: [{ id: 'out', label: 'Out', type: 'json' }], config: { implementation: { kind: 'none' } } }),
+    key: 'empty', kind: 'module', group: 'General', label: 'Step', description: 'A generic step or module of your project. Name it anything.',
+    build: (id, position) => node({ id, kind: 'module', label: 'New step', position, inputs: [RULES_PORT, { id: 'in', label: 'In', type: 'any' }], outputs: [{ id: 'out', label: 'Out', type: 'json' }], config: { implementation: { kind: 'none' } } }),
   },
 ];
 

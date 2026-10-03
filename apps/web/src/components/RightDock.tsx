@@ -1,6 +1,7 @@
 import { useRef, useState, type PointerEvent as RPointerEvent, type ReactNode } from 'react';
 import { safeStorage, useStore } from '../store';
 import { HistoryView } from './HistoryPanel';
+import { SimulationPanel } from './Simulation';
 
 export interface DockSection {
   id: string;
@@ -14,6 +15,7 @@ export interface DockSection {
 /** Sections of the right-hand dock. Add new ones here; each gets an icon on the rail. */
 export const DOCK_SECTIONS: DockSection[] = [
   { id: 'history', label: 'History', icon: '⟲', shortcut: 'Shift+H', render: () => <HistoryView /> },
+  { id: 'simulation', label: 'Simulate', icon: '◉', render: () => <SimulationPanel /> },
 ];
 
 const MIN_W = 280;

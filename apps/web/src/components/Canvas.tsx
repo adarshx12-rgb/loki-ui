@@ -255,7 +255,9 @@ export function Canvas() {
   // Path highlighting for the selected node (actual graph structure, not activity).
   const pathSets = useMemo(() => {
     if (!wf || !selectedNodeId) return null;
-    if (wf.nodes.find((n) => n.id === selectedNodeId)?.kind === 'group') return null;
+    // A just-deleted (or group) node has no path to highlight; dimming everything would hide the graph.
+    const sel = wf.nodes.find((n) => n.id === selectedNodeId);
+    if (!sel || sel.kind === 'group') return null;
     return { up: upstreamOf(wf, selectedNodeId), down: downstreamOf(wf, selectedNodeId) };
   }, [wf, selectedNodeId]);
 
@@ -387,7 +389,7 @@ export function Canvas() {
     if (tool !== 'hand' && (ev.target as HTMLElement).classList.contains('react-flow__pane')) set({ nodeSearch: { x: ev.clientX, y: ev.clientY } });
   };
 
-  if (!wf) return <div className="canvas-empty">No workflow selected.</div>;
+  if (!wf) return <div className="canvas-empty">No project selected. Use <b>&nbsp;＋ New&nbsp;</b> or <b>&nbsp;⇪ Import project&nbsp;</b> above.</div>;
 
   return (
     <div className={`canvas tool-${tool}`} onDragOver={onDragOver} onDrop={onDrop} onDoubleClick={onDoubleClick}>

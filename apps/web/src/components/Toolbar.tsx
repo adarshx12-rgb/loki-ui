@@ -1,6 +1,7 @@
 import { useStore } from '../store';
 import { StatusChip } from '../status';
 import { draftState } from '../inspector/draft';
+import { WorkflowPicker } from './WorkflowPicker';
 
 export function Toolbar() {
   const s = useStore();
@@ -16,18 +17,7 @@ export function Toolbar() {
       <div className="brand" title="Branding is configurable via NODEPILOT_APP_NAME">
         <span className="logo" aria-hidden="true">◈</span> {s.appName}
       </div>
-      <select
-        className="input wf-select"
-        aria-label="Workflow"
-        value={wf?.id ?? ''}
-        onChange={(e) => void s.loadWorkflow(e.target.value)}
-      >
-        {s.workflows.map((w) => (
-          <option key={w.id} value={w.id}>
-            {w.name}{w.isExample ? ' (example)' : ''}
-          </option>
-        ))}
-      </select>
+      <WorkflowPicker />
       <button className="btn ghost" onClick={() => s.set({ dialog: 'newWorkflow' })} title="New empty workflow">＋ New</button>
       <button className="btn" onClick={() => s.set({ dialog: 'import' })} title="Build a workflow from a git link or project folder">⇪ Import project</button>
       {wf && <span className="rev" title={`Revision ${wf.revision}. Executable hash ${s.execHash} (unchanged by layout edits)`}>r{wf.revision}</span>}

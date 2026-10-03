@@ -42,6 +42,41 @@ export function NewWorkflow() {
   );
 }
 
+export function DeleteWorkflowDialog() {
+  const s = useStore();
+  const target = s.deleteTarget;
+  const [busy, setBusy] = useState(false);
+  if (!target) return null;
+  const close = () => !busy && s.set({ dialog: null, deleteTarget: null });
+  const confirm = async () => {
+    setBusy(true);
+    const ok = await s.deleteWorkflow(target.id);
+    setBusy(false);
+    if (ok) s.set({ dialog: null, deleteTarget: null });
+  };
+  return (
+    <Modal title="Delete project?" onClose={close}>
+      <p style={{ margin: 0 }}>
+        <b>“{target.name}”</b> will be permanently deleted. This can’t be undone.
+      </p>
+      <ul className="small" style={{ margin: 0, paddingLeft: 18 }}>
+        <li>the graph, notes and instructions</li>
+        <li>all runs, history, tasks and activity for it</li>
+        {target.imported && <li>NodePilot’s private demo copy of its files (from the git link or folder you imported)</li>}
+      </ul>
+      <div className="banner info" role="note">
+        <span aria-hidden="true">🔒</span>
+        <span>Your original project, on disk or on GitHub, is not touched. Only NodePilot’s own data is removed.</span>
+      </div>
+      <div className="row">
+        <button className="btn" onClick={close} disabled={busy}>Cancel</button>
+        <span className="grow" />
+        <button className="btn danger" onClick={() => void confirm()} disabled={busy}>{busy ? 'Deleting…' : 'Delete permanently'}</button>
+      </div>
+    </Modal>
+  );
+}
+
 export function ValidateDialog() {
   const s = useStore();
   const issues = s.validation?.issues ?? [];

@@ -39,7 +39,7 @@ export function StatusChip({ status, title, small }: { status: string; title?: s
 
 export const KIND_ICON: Record<string, string> = {
   input: '⇥', planner: '◇', combiner: '⊕', scanner: '⌕', worker: '⚙', judge: '⚖', aggregator: 'Σ', api_service: '☁', model: '✦', output: '⇤',
-  instruction: '¶', auxiliary: '⋯', group: '▭', router: '◆', datastore: '⛁',
+  instruction: '¶', auxiliary: '⋯', group: '▭', router: '◆', datastore: '⛁', module: '▢', ui: '▣',
 };
 
 export type Dot = 'active' | 'running' | 'attention' | 'stopped' | 'idle' | 'external';
