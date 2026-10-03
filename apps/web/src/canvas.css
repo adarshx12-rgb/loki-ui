@@ -46,7 +46,8 @@
 .shape-circle.selected { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(122, 162, 247, .35); }
 .circle-text { display: flex; flex-direction: column; align-items: center; text-align: center; max-width: 80px; }
 .circle-text b { font-size: 20px; font-family: var(--mono); letter-spacing: .02em; }
-.circle-text span { font-size: 10.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 78px; }
+/* Formats like "mp4 · mov · webm" wrap onto up to three short lines. */
+.circle-text span { font-size: 9.5px; line-height: 1.25; color: var(--muted); max-width: 80px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow-wrap: anywhere; }
 
 /* parallelogram: instructions / rules */
 .shape-parallelogram { width: 200px; min-height: 58px; display: flex; align-items: center; justify-content: center; padding: 8px 22px; }

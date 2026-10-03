@@ -25,10 +25,18 @@ export interface AnalysisResult {
   stats: { filesScanned: number; filesMatched: number; models: string[]; languages: string[]; mode: 'structure' | 'pipeline'; reason: string; hiddenModules: number };
 }
 
-const SOURCE_EXT = new Set(['.ts', '.tsx', '.js', '.mjs', '.cjs', '.jsx', '.py', '.go', '.rs', '.java', '.kt', '.rb', '.php', '.cs', '.swift', '.vue', '.svelte']);
+const SOURCE_EXT = new Set(['.ts', '.tsx', '.js', '.mjs', '.cjs', '.jsx', '.py', '.go', '.rs', '.java', '.kt', '.rb', '.php', '.cs', '.swift', '.vue', '.svelte', '.astro']);
 const PROMPT_EXT = new Set(['.md', '.txt', '.prompt', '.yaml', '.yml', '.j2', '.jinja', '.hbs', '.mustache']);
-/** Dependencies, build output, tests, docs, virtualenvs (any folder with "venv" in its name), site-packages and hidden folders. */
-const SKIP_DIR = /(^|\/)(node_modules|dist|build|out|coverage|vendor|__pycache__|target|migrations?|fixtures?|__tests__|tests?|spec|e2e|examples?|docs?|scripts?|public|static|assets|site-packages|[^/]*venv[^/]*|\.[^/]+)(\/|$)/i;
+/**
+ * Folders with no project logic: dependencies, build output, tests and scratch/benchmark runs
+ * ("test-results", "bench", "tmp"…), docs, virtualenvs (any name containing "venv") and hidden folders.
+ */
+const NOISE_DIR = /^(node_modules|dist|build|out|coverage|vendor|__pycache__|target|migrations?|fixtures?|mocks?|__mocks__|__tests__|tests?|testing|specs?|e2e|examples?|docs?|scripts?|public|static|assets|site-packages|bench(marks?)?|harness|tmp|temp|scratch|playground|notebooks?|screenshots?)$/i;
+function isNoiseDir(seg: string) {
+  // Names like "results" or "reports" can be real features, so only test-flavoured ones ("test-results", "e2e-tests") are skipped.
+  return NOISE_DIR.test(seg) || /venv/i.test(seg) || seg.startsWith('.') || /(^|[-_])tests?([-_]|$)/i.test(seg);
+}
+const inNoiseDir = (p: string) => path.posix.dirname(p).split('/').some((s) => s && s !== '.' && isNoiseDir(s));
 const SKIP_FILE = /(\.test\.|\.spec\.|\.d\.ts$|^setup\.|config\.(js|ts|cjs|mjs)$|eslint|prettier|vite|webpack|rollup|jest|vitest)/i;
 const COL = 300;
 const ROW = 200;
@@ -133,6 +141,8 @@ function importsOf(file: SourceFile, known: Map<string, string>, workspace: Map<
 }
 
 interface Prepared {
+  /** Every file given (normalised paths), including ones not analysed, e.g. config files holding model ids. */
+  all: SourceFile[];
   usable: SourceFile[];
   known: Map<string, string>;
   imports: Map<string, Set<string>>;
@@ -153,9 +163,9 @@ function prepare(files: SourceFile[]): Prepared {
       if (typeof name === 'string' && name) workspace.set(name, path.posix.dirname(p) === '.' ? '' : path.posix.dirname(p));
     } catch { /* not JSON */ }
   }
-  const usable = files
-    .map((f) => ({ ...f, path: f.path.replace(/\\/g, '/').replace(/^\.?\//, '') }))
-    .filter((f) => !SKIP_DIR.test(path.posix.dirname(f.path) + '/') && !SKIP_FILE.test(path.posix.basename(f.path)))
+  const all = files.map((f) => ({ ...f, path: f.path.replace(/\\/g, '/').replace(/^\.?\//, '') }));
+  const usable = all
+    .filter((f) => !inNoiseDir(f.path) && !SKIP_FILE.test(path.posix.basename(f.path)))
     .filter((f) => SOURCE_EXT.has(path.posix.extname(f.path).toLowerCase()) || PROMPT_EXT.has(path.posix.extname(f.path).toLowerCase()));
   const known = new Map<string, string>();
   for (const f of usable) known.set(f.path.replace(/\.[^.]+$/, ''), f.path);
@@ -172,7 +182,7 @@ function prepare(files: SourceFile[]): Prepared {
     m.forEach((x) => allModels.add(x));
   }
   const languages = [...new Set(usable.map((f) => path.posix.extname(f.path).slice(1).toLowerCase()).filter((e) => SOURCE_EXT.has(`.${e}`)))];
-  return { usable, known, imports, packages, models, allModels, languages };
+  return { all, usable, known, imports, packages, models, allModels, languages };
 }
 
 /** Third-party packages and hosts → the external service they represent. */
@@ -194,7 +204,8 @@ const EXTERNALS: { re: RegExp; label: string; kind: NodeKind; llm?: boolean }[] 
   { re: /^(@openrouter\/.+|openrouter)$/, label: 'OpenRouter', kind: 'api_service', llm: true },
   { re: /^(langchain|@langchain\/.+)$/, label: 'LangChain', kind: 'api_service', llm: true },
   { re: /^(ai|@ai-sdk\/.+)$/, label: 'Vercel AI SDK', kind: 'api_service', llm: true },
-  { re: /^(transformers|torch|@xenova\/transformers|@huggingface\/.+|huggingface_hub)$/, label: 'Hugging Face / local models', kind: 'api_service', llm: true },
+  // Model weights are downloaded from the Hub; the models themselves run locally (see ML_RUNTIMES).
+  { re: /^(@xenova\/transformers|@huggingface\/.+|huggingface_hub)$/, label: 'Hugging Face Hub', kind: 'api_service' },
   { re: /^(youtube-transcript.*|youtube_transcript_api|ytdl-core|@distube\/ytdl-core|yt_dlp|youtubei\.js|youtubei)$/, label: 'YouTube', kind: 'api_service' },
   { re: /^googleapis$/, label: 'Google APIs', kind: 'api_service' },
   { re: /^stripe$/, label: 'Stripe', kind: 'api_service' },
@@ -491,6 +502,91 @@ const MAX_EXTERNALS = 8;
 
 /** Folders that only hold code and say nothing about it: "apps/server/src" is just "Server". */
 const STRUCTURAL = /^(src|lib|apps|packages|pkg|source|internal|cmd|code|modules)$/;
+const isStructuralOnly = (key: string) => key.split('/').every((s) => !s || s === '.' || STRUCTURAL.test(s));
+
+/** Libraries that run a model in-process (browser or machine). A file importing one of these *is* a model. */
+const ML_RUNTIMES: { re: RegExp; label: string }[] = [
+  { re: /^onnxruntime(-web|-node|-react-native|-gpu)?$/, label: 'ONNX Runtime' },
+  { re: /^@tensorflow\/tfjs/, label: 'TensorFlow.js' },
+  { re: /^(@huggingface\/transformers|@xenova\/transformers)$/, label: 'Transformers.js' },
+  { re: /^@mediapipe\//, label: 'MediaPipe' },
+  { re: /^@mlc-ai\/web-llm$/, label: 'WebLLM' },
+  { re: /^(node-llama-cpp|llama_cpp|llama-cpp-python)$/, label: 'llama.cpp' },
+  { re: /^(torch|torchvision|torchaudio)$/, label: 'PyTorch' },
+  { re: /^(tensorflow|keras|tf_keras)$/, label: 'TensorFlow' },
+  { re: /^transformers$/, label: 'Transformers' },
+  { re: /^diffusers$/, label: 'Diffusers' },
+  { re: /^ultralytics$/, label: 'Ultralytics YOLO' },
+  { re: /^(mlx|mlx_lm|mlx\.core)$/, label: 'MLX' },
+  { re: /^(whisper|faster_whisper)$/, label: 'Whisper' },
+];
+/** Support code that lives next to models but is not one. */
+const MODEL_HELPER = /^(index|types?|errors?|utils?|helpers?|config|constants?|base|common|registry|loader|cache|cached.*|.*fix|.*shader.*|saved.*|.*-?utils?)$/i;
+const MODEL_FOLDER = /^(models?|ml|inference|ai|weights|nets?|networks?|matting|segmentation)$/i;
+
+function modelRuntime(f: SourceFile, p: Prepared): string | undefined {
+  if (MODEL_HELPER.test(stem(f.path))) return undefined;
+  for (const pkg of p.packages.get(f.path) ?? []) {
+    const r = ML_RUNTIMES.find((x) => x.re.test(pkg));
+    if (r) return r.label;
+  }
+  return /\bInferenceSession\b|\bloadGraphModel\b|\bloadLayersModel\b|\.from_pretrained\(/.test(f.content) ? 'model' : undefined;
+}
+
+/** "ben2" → "BEN2", "rvm" → "RVM"; longer names keep their own spelling ("withoutbg"). */
+const modelName = (s: string) => (/^[a-z]{2,4}\d{0,2}$/i.test(s) ? s.toUpperCase() : s);
+
+/** Model source mentioned for a model file: a Hugging Face repo or a model URL from the constants it imports. */
+function modelSource(f: SourceFile, all: SourceFile[]): string | undefined {
+  const direct = f.content.match(/huggingface\.co\/([\w.-]+\/[\w.-]+)|['"]([\w.-]+\/[\w.-]+-onnx)['"]/i);
+  if (direct) return direct[1] ?? direct[2];
+  for (const id of new Set(f.content.match(/\b[A-Z][A-Z0-9_]*MODEL[A-Z0-9_]*\b/g) ?? [])) {
+    for (const other of all) {
+      const at = other.content.search(new RegExp(`\\b${id}\\s*[:=]`));
+      if (at < 0) continue;
+      const block = other.content.slice(at, at + 700);
+      const m = block.match(/repo\s*:\s*['"`]([^'"`]+)['"`]/) ?? block.match(/huggingface\.co\/([\w.-]+\/[\w.-]+)/) ?? block.match(/github\.com\/([\w.-]+\/[\w.-]+)/);
+      if (m) return m[1];
+    }
+  }
+  return undefined;
+}
+
+/** What goes in and what comes out, from upload `accept` lists and the formats the code writes. */
+function ioFormats(files: SourceFile[]) {
+  const input = new Set<string>();
+  const output = new Set<string>();
+  const producers = new Set<string>();
+  const add = (set: Set<string>, token: string) => {
+    const t = token.trim().toLowerCase();
+    if (!t) return;
+    if (t.startsWith('.')) set.add(t.slice(1));
+    else if (t.endsWith('/*')) set.add(t.slice(0, -2));
+    else if (t.includes('/')) set.add(t.split('/')[1].replace(/^x-/, '').replace('quicktime', 'mov').replace('jpeg', 'jpg'));
+  };
+  for (const f of files) {
+    for (const m of f.content.matchAll(/accept\s*=\s*\{?\s*["'`]([^"'`]+)["'`]/g)) m[1].split(',').forEach((t) => add(input, t));
+    let wrote = false;
+    for (const m of f.content.matchAll(/mimeType\s*:\s*['"`]((?:video|audio|image)\/[\w.+-]+)/g)) { add(output, m[1]); wrote = true; }
+    for (const m of f.content.matchAll(/to(?:Blob|DataURL)\([^)]*?['"`](image\/[\w+-]+)['"`]/g)) { add(output, m[1]); wrote = true; }
+    for (const m of f.content.matchAll(/download\s*=\s*\{?\s*[`'"][^`'"\n]*?\.(mp4|webm|mov|mkv|gif|png|jpe?g|webp|wav|mp3|json|csv|pdf|zip|txt)[`'"]/g)) { output.add(m[1].replace('jpeg', 'jpg')); wrote = true; }
+    if (/\bdownload=|\.download\s*=|new MediaRecorder\(/.test(f.content)) wrote = true;
+    if (wrote) producers.add(f.path);
+  }
+  // "video" next to "mp4, mov…" says nothing extra.
+  const tidy = (set: Set<string>) => {
+    const list = [...set];
+    const hasVideo = list.some((x) => ['mp4', 'mov', 'webm', 'mkv', 'avi'].includes(x));
+    const hasImage = list.some((x) => ['png', 'jpg', 'webp', 'gif'].includes(x));
+    // Video first, then audio, documents/data, images last.
+    const rank = (x: string) => (['mp4', 'mov', 'webm', 'mkv', 'avi', 'video'].includes(x) ? 0 : ['wav', 'mp3', 'audio'].includes(x) ? 1 : ['png', 'jpg', 'webp', 'gif', 'image'].includes(x) ? 3 : 2);
+    return list
+      .filter((x) => !(x === 'video' && hasVideo) && !(x === 'image' && hasImage))
+      .sort((a, b) => rank(a) - rank(b))
+      .map((x) => (x === 'image' ? 'images' : x));
+  };
+  return { input: tidy(input), output: tidy(output), producers };
+}
 
 function unitLabel(key: string, isFile: boolean): string {
   const all = key.split('/').filter((s) => s && !/^\(.*\)$/.test(s)); // drop Next.js route groups like (dashboard)
@@ -515,12 +611,17 @@ function analyzeStructure(p: Prepared, g: GraphBuilder, opts: { projectName: str
   const perDir = new Map<string, number>();
   for (const f of sources) perDir.set(dirOf(f), (perDir.get(dirOf(f)) ?? 0) + 1);
   const splitDir = (d: string) => d === '.' || ((perDir.get(d) ?? 0) > 8 && (perDir.get(d) ?? 0) > sources.length * 0.3);
+  const dirsLower = new Map([...perDir.keys()].map((d) => [d.toLowerCase(), d]));
+  const fileImportedBy = new Map<string, number>();
+  for (const set of p.imports.values()) for (const x of set) fileImportedBy.set(x, (fileImportedBy.get(x) ?? 0) + 1);
   const unitKeyOf = new Map<string, string>();
   const units = new Map<string, Unit>();
   for (const f of sources) {
     const d = dirOf(f);
-    const isFile = splitDir(d);
-    const key = isFile ? f.path : d;
+    // "Studio.tsx" next to a "studio/" folder is one thing: the Studio.
+    const twin = dirsLower.get(path.posix.join(d, stem(f.path)).toLowerCase());
+    const isFile = !(twin && !splitDir(twin)) && splitDir(d);
+    const key = twin && !splitDir(twin) ? twin : isFile ? f.path : d;
     unitKeyOf.set(f.path, key);
     let u = units.get(key);
     if (!u) {
@@ -528,6 +629,35 @@ function analyzeStructure(p: Prepared, g: GraphBuilder, opts: { projectName: str
       units.set(key, u);
     }
     u.files.push(f);
+  }
+  for (const u of units.values()) {
+    const base = path.posix.basename(u.key).toLowerCase();
+    const twinFile = u.files.find((f) => path.posix.dirname(f.path) !== u.key && stem(f.path) === base);
+    if (twinFile) u.label = titleCase(path.posix.basename(twinFile.path).replace(/\.[^.]+$/, ''));
+    // "src/lib" says nothing; name it after its most-used files instead.
+    else if (u.files.length > 1 && isStructuralOnly(u.key)) {
+      u.label = [...u.files].sort((a, b) => (fileImportedBy.get(b.path) ?? 0) - (fileImportedBy.get(a.path) ?? 0)).slice(0, 2).map((f) => titleCase(path.posix.basename(f.path).replace(/\.[^.]+$/, ''))).join(' · ');
+    }
+  }
+
+  // 1b. Models the project runs itself: each model file is its own box (grouped later); the helpers beside them are folded away.
+  const modelUnits = new Map<string, { runtime: string; source?: string }>();
+  const supportUnits = new Set<string>();
+  for (const u of [...units.values()]) {
+    const found = u.files.map((f) => ({ f, runtime: modelRuntime(f, p) })).filter((x) => x.runtime);
+    if (!found.length) continue;
+    for (const { f, runtime } of found) {
+      const key = f.path;
+      if (key !== u.key) units.set(key, { key, files: [f], label: modelName(stem(f.path)), kind: 'model', entry: false, models: [], externals: new Set(), score: 0 });
+      else u.label = modelName(stem(f.path));
+      unitKeyOf.set(f.path, key);
+      modelUnits.set(key, { runtime: runtime!, source: modelSource(f, p.all) });
+    }
+    if (u.key !== found[0].f.path) {
+      u.files = u.files.filter((f) => !found.some((x) => x.f === f));
+      if (!u.files.length) units.delete(u.key);
+      else if (MODEL_FOLDER.test(path.posix.basename(u.key))) supportUnits.add(u.key);
+    }
   }
 
   // 2. Unit → unit and unit → external usage.
@@ -561,6 +691,14 @@ function analyzeStructure(p: Prepared, g: GraphBuilder, opts: { projectName: str
   const importedBy = new Map<string, number>();
   for (const set of uses.values()) for (const k of set) importedBy.set(k, (importedBy.get(k) ?? 0) + 1);
   for (const u of units.values()) {
+    const model = modelUnits.get(u.key);
+    if (model) {
+      // Chips: how it runs, and where the weights come from.
+      u.kind = 'model';
+      u.models = [model.runtime, ...(model.source ? [model.source] : []), ...(p.models.get(u.files[0].path) ?? [])].filter((x, i, a) => x !== 'model' && a.indexOf(x) === i);
+      u.score = 20;
+      continue;
+    }
     const isFileUnit = u.files.length === 1 && u.key === u.files[0].path;
     const name = isFileUnit ? stem(u.key) : path.posix.basename(u.key).toLowerCase();
     u.models = [...new Set(u.files.flatMap((f) => p.models.get(f.path) ?? []))];
@@ -576,13 +714,16 @@ function analyzeStructure(p: Prepared, g: GraphBuilder, opts: { projectName: str
     else if (role && usesLlm) u.kind = role.kind;
     else if (usesLlm) u.kind = 'model';
     else u.kind = 'module';
-    u.entry = isApi || isPage || (!importedBy.get(u.key) && u.files.some((f) => ENTRY_STEM.test(stem(f.path)) || stem(f.path) === 'index'));
+    u.entry = isApi || isPage
+      || (!importedBy.get(u.key) && u.files.some((f) => ENTRY_STEM.test(stem(f.path)) || stem(f.path) === 'index'))
+      // A screen nothing else imports is where people start (its page may be .html/.astro outside the scan).
+      || (u.kind === 'ui' && !importedBy.get(u.key));
     if (isApi && !/api$/i.test(u.label) && u.kind !== 'instruction') u.label = `${u.label} API`;
     u.score = (u.entry ? 4 : 0) + (usesLlm ? 4 : 0) + Math.log2(1 + u.files.length) + Math.min(importedBy.get(u.key) ?? 0, 5) + Math.min(uses.get(u.key)?.size ?? 0, 3) + u.externals.size;
   }
 
   // 4. Keep the most important units; bridge edges through the ones left out.
-  const ranked = [...units.values()].sort((a, b) => b.score - a.score || a.key.localeCompare(b.key));
+  const ranked = [...units.values()].filter((u) => !supportUnits.has(u.key)).sort((a, b) => b.score - a.score || a.key.localeCompare(b.key));
   const kept = new Set(ranked.slice(0, MAX_UNITS).map((u) => u.key));
   const hidden = units.size - kept.size;
   const keptUses = new Map<string, Set<string>>();
@@ -632,15 +773,23 @@ function analyzeStructure(p: Prepared, g: GraphBuilder, opts: { projectName: str
       if (indeg.get(t) === 0) queue.push(t);
     }
   }
+  // Models get a column of their own, so they read as one stage (and fit in one group box).
+  const modelKeys = [...kept].filter((k) => modelUnits.has(k));
+  if (modelKeys.length) {
+    const L = Math.min(...modelKeys.map((k) => layer.get(k) ?? 1));
+    for (const k of kept) if (!modelUnits.has(k) && (layer.get(k) ?? 1) >= L) layer.set(k, (layer.get(k) ?? 1) + 1);
+    for (const k of modelKeys) layer.set(k, L);
+  }
   const maxLayer = Math.max(1, ...layer.values());
 
   // 7. Nodes.
+  const io = ioFormats(sources);
   const nodeOf = new Map<string, WorkflowNode>();
   const columns: WorkflowNode[][] = [];
   const entries = [...kept].filter((k) => units.get(k)!.entry);
   const input = nodeSchema.parse({
-    id: g.idFor('input'), kind: 'input', label: 'Requests', position: { x: 0, y: 0 },
-    purpose: `Where work enters ${opts.projectName}${entries.length ? `: ${entries.map((k) => units.get(k)!.label).join(', ')}` : ''}.`,
+    id: g.idFor('input'), kind: 'input', label: io.input.length ? io.input.join(' · ') : 'Requests', position: { x: 0, y: 0 },
+    purpose: `${io.input.length ? `Accepts: ${io.input.join(', ')}. ` : ''}Where work enters ${opts.projectName}${entries.length ? `: ${entries.map((k) => units.get(k)!.label).join(', ')}` : ''}.`,
     outputs: [{ id: 'request', label: 'Request', type: 'text' }],
     config: g.observed,
   });
@@ -678,6 +827,23 @@ function analyzeStructure(p: Prepared, g: GraphBuilder, opts: { projectName: str
     else if (a.kind !== 'instruction') g.edge(a.id, 'out', b.id, 'in');
   }
 
+  // What comes out, fed by the code that writes files / recordings / downloads.
+  const keptParent = (unitKey: string) => (kept.has(unitKey) ? [unitKey] : [...kept].filter((x) => [...(uses.get(x) ?? [])].includes(unitKey)));
+  const producerUnits = new Set([...io.producers].flatMap((f) => keptParent(unitKeyOf.get(f) ?? '')));
+  let outCol = 0;
+  if (io.output.length || producerUnits.size) {
+    outCol = maxLayer + 1;
+    const output = nodeSchema.parse({
+      id: g.idFor('output'), kind: 'output', label: io.output.length ? io.output.join(' · ') : 'Output', position: { x: outCol * COL, y: 0 },
+      purpose: `${io.output.length ? `Produces: ${io.output.join(', ')}. ` : ''}Written by ${[...producerUnits].map((k) => units.get(k)?.label ?? k).join(', ') || 'the project'}.`,
+      inputs: [{ id: 'in', label: 'In', type: 'any', required: false, multiple: true, merge: 'object_by_source' }],
+      config: g.observed,
+    });
+    g.nodes.push(output);
+    columns.push([output]);
+    for (const k of producerUnits) g.edge(nodeOf.get(k)!.id, 'out', output.id, 'in');
+  }
+
   // External services in the last column, fed by the units that use them.
   const extCol: WorkflowNode[] = [];
   for (const e of externals) {
@@ -687,18 +853,15 @@ function analyzeStructure(p: Prepared, g: GraphBuilder, opts: { projectName: str
       kind: meta.kind,
       label: g.uniqueLabel(e, 'external'),
       purpose: `External ${meta.kind === 'datastore' ? 'data store' : meta.llm ? 'model provider' : 'service'} used by ${[...(extUse.get(e) ?? [])].map((k) => units.get(k)?.label ?? k).slice(0, 6).join(', ')}.`,
-      position: { x: (maxLayer + 1) * COL, y: 0 },
+      position: { x: (Math.max(maxLayer, outCol) + 1) * COL, y: 0 },
       inputs: [{ ...IN_PORT, label: meta.kind === 'datastore' ? 'Read / write' : 'Calls' }],
       outputs: [OUT_PORT],
       config: g.observed,
     });
     g.nodes.push(n);
     extCol.push(n);
-    for (const k of extUse.get(e) ?? []) {
-      // A hidden unit's calls are drawn from the kept unit that leads to it.
-      const from = kept.has(k) ? [k] : [...kept].filter((x) => [...(uses.get(x) ?? [])].includes(k));
-      for (const f of from) g.edge(nodeOf.get(f)!.id, 'out', n.id, 'in');
-    }
+    // A hidden unit's calls are drawn from the kept unit that leads to it.
+    for (const k of extUse.get(e) ?? []) for (const f of keptParent(k)) g.edge(nodeOf.get(f)!.id, 'out', n.id, 'in');
   }
   if (extCol.length) columns.push(extCol);
 
@@ -724,6 +887,20 @@ function analyzeStructure(p: Prepared, g: GraphBuilder, opts: { projectName: str
     const col = columns.find((c) => c.includes(llmNode))!;
     const top = Math.min(...col.map((n) => n.position.y));
     g.nodes.filter((n) => n.kind === 'instruction' && !col.includes(n)).forEach((n, i) => { n.position = { x: llmNode.position.x + 10, y: top - 170 - i * 110 }; });
+  }
+
+  // One box around the models, like an ensemble.
+  const modelNodes = modelKeys.map((k) => nodeOf.get(k)!).filter(Boolean);
+  if (modelNodes.length >= 2) {
+    const ys = modelNodes.map((n) => n.position.y);
+    const minY = Math.min(...ys) - 60;
+    const maxY = Math.max(...ys) + 210;
+    g.nodes.unshift(nodeSchema.parse({
+      id: g.idFor('models_group'), kind: 'group', label: 'Local models', position: { x: modelNodes[0].position.x - 25, y: minY },
+      display: { width: 290, height: Math.round(maxY - minY) },
+      purpose: `Models the project runs itself: ${modelNodes.map((n) => n.label).join(', ')}.`,
+      config: { implementation: { kind: 'none' } },
+    }));
   }
   return hidden;
 }

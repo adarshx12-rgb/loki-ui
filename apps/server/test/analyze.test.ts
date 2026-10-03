@@ -133,6 +133,54 @@ describe('ordinary projects keep their real structure', () => {
   });
 });
 
+describe('projects that run their own models (e.g. a browser video background remover)', () => {
+  const app = [
+    { path: 'package.json', content: '{"name":"video-bg-remove"}' },
+    { path: 'src/config.ts', content: "export const BEN2_MODEL = {\n  repo: 'onnx-community/BEN2-ONNX',\n};\nexport const RVM_MODEL = { url: 'https://github.com/PeterL1n/RobustVideoMatting/releases/x' };" },
+    { path: 'src/components/Studio.tsx', content: "import { Stage } from './studio/Stage';\nimport { createProcessor } from '../lib/processorClient';\nexport function Studio() { return <input type=\"file\" accept=\"video/*,.mp4,.mov,.webm\" />; }" },
+    { path: 'src/components/studio/Stage.tsx', content: 'export function Stage() { return <a download="out.webm" />; }' },
+    { path: 'src/lib/processorClient.ts', content: "export const createProcessor = () => new Worker(new URL('../worker/processor.worker.ts', import.meta.url));" },
+    { path: 'src/lib/pipeline.ts', content: "import { composite } from './compositing/compositor';\nexport const run = () => { new MediaRecorder(s, { mimeType: 'video/webm' }); composite(); };" },
+    { path: 'src/lib/compositing/compositor.ts', content: 'export const composite = () => 1;' },
+    { path: 'src/worker/processor.worker.ts', content: "import { run } from '../lib/pipeline';\nimport { ben2 } from '../lib/models/ben2';\nimport { rvm } from '../lib/models/rvm';" },
+    { path: 'src/lib/models/ben2.ts', content: "import { pipeline } from '@huggingface/transformers';\nimport { BEN2_MODEL } from '../../config';\nimport { cachedFetch } from './cachedFetch';\nexport const ben2 = 1;" },
+    { path: 'src/lib/models/rvm.ts', content: "import { loadGraphModel } from '@tensorflow/tfjs-converter';\nimport { RVM_MODEL } from '../../config';\nexport const rvm = 1;" },
+    { path: 'src/lib/models/cachedFetch.ts', content: 'export const cachedFetch = 1;' },
+    { path: 'src/lib/models/errors.ts', content: 'export class GpuBackendError extends Error {}' },
+    // scratch runs and browser profiles: never part of the picture
+    ...Array.from({ length: 12 }, (_, i) => ({ path: `test-results/debug-${i}.mjs`, content: "import x from '../src/lib/models/ben2';" })),
+    { path: 'tests/harness/bench-rvm.ts', content: 'export {}' },
+  ];
+  const r = analyzeRepository(app, { serviceId: 'vbr', projectName: 'video bg remove' });
+  const label = (l: string) => r.nodes.find((n) => n.label === l);
+
+  it('is concise: no scratch scripts, no helper files, one box per real part', () => {
+    expect(r.nodes.some((n) => n.codeRefs.some((c) => c.path.startsWith('test-results/') || c.path.startsWith('tests/')))).toBe(false);
+    expect(r.nodes.some((n) => /cached|errors/i.test(n.label))).toBe(false);
+    expect(r.nodes.length).toBeLessThanOrEqual(12);
+  });
+
+  it('shows each local model inside a "Local models" group, with its runtime and source', () => {
+    const ben2 = label('BEN2')!;
+    const rvm = label('RVM')!;
+    expect(ben2.kind).toBe('model');
+    expect((ben2.config.params as { models: string[] }).models).toEqual(['Transformers.js', 'onnx-community/BEN2-ONNX']);
+    expect((rvm.config.params as { models: string[] }).models[0]).toBe('TensorFlow.js');
+    const group = r.nodes.find((n) => n.kind === 'group')!;
+    expect(group.label).toBe('Local models');
+    expect(ben2.position.x).toBe(rvm.position.x);
+  });
+
+  it('labels input and output with the file formats, and merges Studio.tsx with its studio/ folder', () => {
+    expect(r.nodes.find((n) => n.kind === 'input')!.label).toBe('mp4 · mov · webm');
+    expect(r.nodes.find((n) => n.kind === 'output')!.label).toBe('webm');
+    expect(label('Studio')?.kind).toBe('ui');
+    expect(r.nodes.filter((n) => /studio/i.test(n.label))).toHaveLength(1);
+    // the flow reads left to right: input → Studio → … → models
+    expect(label('Studio')!.position.x).toBeLessThan(label('BEN2')!.position.x);
+  });
+});
+
 describe('model detection', () => {
   it('finds versioned model ids and ignores prose', () => {
     expect(detectModels("use 'gemini-3.8-flash' or openai/gpt-6-luna; Gemini-only path; claude-skills; o3 ")).toEqual(['openai/gpt-6-luna', 'gemini-3.8-flash']);
